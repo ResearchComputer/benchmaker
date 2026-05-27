@@ -1,0 +1,46 @@
+# Benchmark a vLLM / SGLang / OpenAI-compatible endpoint with a prompt dataset.
+workload_type:
+  type: openai
+  url: http://localhost:8000/v1/chat/completions
+  model: meta-llama/Llama-3.1-8B-Instruct
+  max_tokens: 128
+  temperature: 0.0
+  # api_key: sk-...
+
+# A `workload` here is the *dataset* of inputs fed through the workload_type.
+# Static list (good for sanity checks). For real benchmarks, use a JSONL file.
+workload:
+  type: static
+  items:
+    - "Write a haiku about distributed systems."
+    - "Explain RDMA in one paragraph."
+    - "What is speculative decoding?"
+  shuffle: true
+  seed: 0
+
+# To stream from a prompt dataset on disk instead:
+#   workload:
+#     type: jsonl
+#     path: data/sharegpt_prompts.jsonl
+#     field: prompt        # yield only this field per line
+
+load: poisson:8
+duration: 60s
+timeout_s: 600
+
+# Optional periodic side-channel samplers. Each tick is recorded as a
+# time-series and summarized in the final report.
+monitors:
+  - type: prometheus
+    name: vllm
+    url: http://localhost:8000/metrics
+    interval_s: 1.0
+    metric_names:
+      - vllm:num_requests_running
+      - vllm:num_requests_waiting
+      - vllm:gpu_cache_usage_perc
+      - vllm:time_to_first_token_seconds_sum
+  # - type: function
+  #   name: gpu
+  #   fn: my_pkg.monitors:read_nvml
+  #   interval_s: 0.5

@@ -1,0 +1,275 @@
+"""BenchRunner: ties scheduler -> workload (dataset) -> workload-type ->
+aiohttp session -> metrics."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
+
+from benchmaker.load import LoadModel
+from benchmaker.metrics import MetricsAggregator
+from benchmaker.types import (
+    PostResponseHook,
+    PreRequestHook,
+    Request,
+    Response,
+    Sample,
+    TicketContext,
+    maybe_await,
+)
+from benchmaker.monitors import Monitor, run_monitor_loop
+from benchmaker.trace import TraceRecorder
+from benchmaker.workloads.base import WorkloadType
+from benchmaker.workloads.datasets import Workload, StaticWorkload
+
+
+@dataclass
+class BenchConfig:
+    workload_type: WorkloadType                # how to talk to the service
+    load: LoadModel                            # when to fire
+    workload: Workload = field(default_factory=StaticWorkload)  # what to send
+    pre_hooks: list[PreRequestHook] = field(default_factory=list)
+    post_hooks: list[PostResponseHook] = field(default_factory=list)
+    monitors: list[Monitor] = field(default_factory=list)  # optional periodic samplers
+    # Optional trace recorder. When set, each fired request is appended to a
+    # JSONL file (with relative timestamp) so a later run can replay the bench
+    # deterministically via `benchmaker.trace.TracePacedLoad` + `ReplayWorkloadType`.
+    recorder: Optional[TraceRecorder] = None
+    connection_limit: int = 1000
+    timeout_s: float = 60.0
+    max_in_flight: int = 10000
+    progress_every_s: float = 1.0
+    stop_on_exhausted: bool = True
+
+
+@dataclass
+class BenchResult:
+    samples: list[Sample]
+    summary: dict
+
+
+class BenchRunner:
+    def __init__(self, config: BenchConfig):
+        self.cfg = config
+        self.metrics = MetricsAggregator()
+
+    async def run(self) -> BenchResult:
+        connector = aiohttp.TCPConnector(
+            limit=self.cfg.connection_limit,
+            ttl_dns_cache=300,
+            force_close=False,
+        )
+        timeout = aiohttp.ClientTimeout(total=self.cfg.timeout_s)
+        if self.cfg.recorder is not None:
+            self.cfg.recorder.open(start_mono=self.metrics.start_time)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            try:
+                await self._drive(session)
+            finally:
+                await self.cfg.workload.aclose()
+                await self.cfg.workload_type.aclose()
+                if self.cfg.recorder is not None:
+                    self.cfg.recorder.close()
+        self.metrics.finalize()
+        return BenchResult(samples=self.metrics.samples, summary=self.metrics.summary())
+
+    async def _drive(self, session: aiohttp.ClientSession) -> None:
+        sem = asyncio.Semaphore(self.cfg.max_in_flight)
+        tasks: set[asyncio.Task] = set()
+        progress_task = asyncio.create_task(self._progress_loop())
+
+        # Spawn monitor loops.
+        monitor_stop = asyncio.Event()
+        monitor_tasks: list[asyncio.Task] = []
+        bench_start = self.metrics.start_time
+        for mon in self.cfg.monitors:
+            buf = self.metrics.monitor_buffer(mon.name)
+            monitor_tasks.append(asyncio.create_task(
+                run_monitor_loop(mon, buf, bench_start, monitor_stop)
+            ))
+
+        try:
+            async for _ in self.cfg.load.tickets():
+                try:
+                    item = await self.cfg.workload.next_item()
+                except StopAsyncIteration:
+                    if self.cfg.stop_on_exhausted:
+                        break
+                    else:
+                        continue
+
+                await sem.acquire()
+                task = asyncio.create_task(self._fire(session, item, sem))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+        finally:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Signal monitors to do one last tick and exit, then wait for them.
+            monitor_stop.set()
+            if monitor_tasks:
+                await asyncio.gather(*monitor_tasks, return_exceptions=True)
+
+    async def _fire(self, session: aiohttp.ClientSession, item: Any,
+                    sem: asyncio.Semaphore) -> None:
+        start_mono = time.monotonic()
+        try:
+            async def fire(req: Request) -> Response:
+                for hook in self.cfg.pre_hooks:
+                    req = await maybe_await(hook(req))
+                fire_start = time.monotonic()
+                if self.cfg.recorder is not None:
+                    await self.cfg.recorder.record(req, fire_start)
+                return await self._execute(session, req, fire_start)
+
+            ctx = TicketContext(
+                item=item,
+                start_mono=start_mono,
+                fire=fire,
+                pre_hooks=tuple(self.cfg.pre_hooks),
+                post_hooks=tuple(self.cfg.post_hooks),
+                workload_name=self.cfg.workload_type.name,
+            )
+            sample = await self.cfg.workload_type.run_ticket(ctx)
+            self.metrics.add(sample)
+        except Exception as e:
+            self.metrics.add(_failure_sample(
+                f"{type(e).__name__}: {e}",
+                self.cfg.workload_type.name,
+            ))
+        finally:
+            sem.release()
+            self.cfg.load.on_complete()
+
+    async def _execute(self, session: aiohttp.ClientSession, req: Request,
+                       start_mono: float) -> Response:
+        kwargs: dict = {"headers": req.headers, "params": req.params}
+        if req.json is not None:
+            kwargs["json"] = req.json
+        elif req.body is not None:
+            kwargs["data"] = req.body
+        if req.timeout_s is not None:
+            kwargs["timeout"] = aiohttp.ClientTimeout(total=req.timeout_s)
+
+        try:
+            async with session.request(req.method, req.url, **kwargs) as resp:
+                if self.cfg.workload_type.streaming:
+                    chunks: list[bytes] = []
+                    chunk_times: list[float] = []
+                    body_parts: list[bytes] = []
+                    async for chunk in resp.content.iter_any():
+                        chunks.append(chunk)
+                        chunk_times.append(time.monotonic() - start_mono)
+                        body_parts.append(chunk)
+                    body = b"".join(body_parts)
+                    elapsed = time.monotonic() - start_mono
+                    return Response(
+                        status=resp.status,
+                        headers=dict(resp.headers),
+                        body=body,
+                        elapsed_s=elapsed,
+                        ok=200 <= resp.status < 400,
+                        stream_chunks=chunks,
+                        stream_chunk_times=chunk_times,
+                    )
+                else:
+                    body = await resp.read()
+                    elapsed = time.monotonic() - start_mono
+                    return Response(
+                        status=resp.status,
+                        headers=dict(resp.headers),
+                        body=body,
+                        elapsed_s=elapsed,
+                        ok=200 <= resp.status < 400,
+                    )
+        except asyncio.TimeoutError:
+            return Response(
+                status=0, headers={}, body=b"",
+                elapsed_s=time.monotonic() - start_mono,
+                ok=False, error="timeout",
+            )
+        except aiohttp.ClientError as e:
+            return Response(
+                status=0, headers={}, body=b"",
+                elapsed_s=time.monotonic() - start_mono,
+                ok=False, error=f"{type(e).__name__}: {e}",
+            )
+
+    async def _progress_loop(self) -> None:
+        if self.cfg.progress_every_s <= 0:
+            return
+        last_n = 0
+        last_t = time.monotonic()
+        seen_errors: set[str] = set()
+        try:
+            while True:
+                await asyncio.sleep(self.cfg.progress_every_s)
+                now = time.monotonic()
+                n = len(self.metrics.samples)
+                dn = n - last_n
+                dt = now - last_t
+                inst = dn / dt if dt > 0 else 0.0
+                window = self.metrics.samples[last_n:]
+                ok = sum(1 for s in window if s.ok)
+                # Wrong: request was delivered (HTTP success) but a post-hook /
+                # workload graded the output as a failure (e.g. eval gate).
+                wrong = sum(1 for s in window if not s.ok and s.request_ok)
+                fail = dn - ok - wrong
+                logger.info(
+                    "+%5d req  (%7.1f rps, %d ok, %d wrong, %d fail) | total=%d",
+                    dn, inst, ok, wrong, fail, n,
+                )
+                # Surface the first occurrence of each distinct error string —
+                # one short line per kind, so failed runs are diagnosable
+                # without grepping samples.jsonl.
+                for s in window:
+                    if s.error and s.error not in seen_errors:
+                        seen_errors.add(s.error)
+                        msg = s.error if len(s.error) <= 200 else s.error[:200] + "..."
+                        bucket = "fail" if not s.request_ok else "wrong"
+                        logger.warning("  first %s: %s", bucket, msg)
+                last_n = n
+                last_t = now
+        except asyncio.CancelledError:
+            return
+
+    def write_bundle(self, out_dir: str, **kwargs) -> str:
+        """Write a per-run directory bundle. See `benchmaker.bundle.write_bundle`."""
+        from benchmaker.bundle import write_bundle
+        return write_bundle(
+            out_dir,
+            self.metrics,
+            workload_type_name=self.cfg.workload_type.name,
+            workload_name=self.cfg.workload.name,
+            **kwargs,
+        )
+
+
+def _failure_sample(error: str, workload: str) -> Sample:
+    return Sample(
+        start_ts=time.monotonic(),
+        latency_s=0.0,
+        status=0,
+        ok=False,
+        request_ok=False,
+        error=error,
+        workload=workload,
+    )
+
+
+async def run_bench(config: BenchConfig) -> BenchResult:
+    return await BenchRunner(config).run()

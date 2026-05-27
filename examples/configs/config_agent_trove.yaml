@@ -1,0 +1,57 @@
+# Run a user-defined Agent over the AgentTrove dataset (open-thoughts/AgentTrove).
+#
+# The Agent class is in examples/agent_trove.py — see that file for the
+# expected `Agent.run(ctx) -> AgentResult` shape and how to attach per-
+# trajectory metrics. Replace `MyAgent.run` with your real multi-step pipeline.
+#
+# Requires:  pip install -e .[hf]
+#
+# Run:
+#   bench-maker run examples/configs/config_agent_trove.yaml \
+#       --out-dir ./runs --label agent=my-agent
+#
+# Outputs:
+#   summary.json   — `workload_metrics.steps.mean` is the avg agent step count;
+#                    `correct.mean` is task accuracy.
+#   samples.jsonl  — one record per task, with the agent's raw output under
+#                    `meta.prediction` and per-trajectory metrics under `extra`.
+
+workload_type:
+  type: agent
+  # 'module:ClassOrCallable'. Class subclassing Agent OR a plain async callable
+  # (AgentContext) -> AgentResult | dict | str. Use `agent_kwargs:` to pass
+  # constructor args.
+  agent: 'examples.agent_trove:MyAgent'
+  agent_kwargs:
+    model: "stub"
+    max_steps: 4
+
+# Pull tasks straight from HuggingFace. Adjust `prompt_field` /
+# `reference_field` to match whatever column names AgentTrove ships with;
+# `extra_fields:` carry through extra columns onto each item / Sample.meta.
+workload:
+  type: hf
+  path: "open-thoughts/AgentTrove"
+  split: train
+  prompt_field: instruction
+  reference_field: expected_response
+  extra_fields: [task_id, tools]
+  max_items: 50
+  shuffle: true
+  seed: 0
+
+# Closed-loop: one agent at a time. Bump to e.g. closed:8 to run agents in
+# parallel (your Agent class must be safe to share across coroutines).
+load: closed:1
+duration: 30m
+timeout_s: 600
+
+# Grade the agent's `output` against `reference`. exact_match is a placeholder;
+# AgentTrove tasks usually need a tolerant grader (judge_llm, or a custom
+# scorer via `factory:`). See docs/eval.md.
+correctness:
+  max_prediction_chars: full
+  scorer:
+    type: exact_match
+    strip: true
+    case_insensitive: true

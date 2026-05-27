@@ -1,0 +1,34 @@
+# Generic HTTP: bench-maker run examples/config.yaml
+workload_type:
+  type: http
+  url: https://httpbin.org/get
+  method: GET
+  headers:
+    User-Agent: bench-maker/0.2
+  timeout_s: 30
+
+# Optional dataset of per-request items. Omit for fixed-request benchmarks.
+# workload:
+#   type: static
+#   items:
+#     - {value: 1}
+#     - {value: 2}
+#     - {value: 3}
+
+# Load spec — any of:
+#   100                           constant 100 rps
+#   poisson:100                   open-loop Poisson, mean 100 rps
+#   closed:32                     closed-loop, 32 concurrent
+#   ramp:10..500:30s              ramp from 10 to 500 rps over 30s
+#   sweep:10,50,100,500@20s       four stages, 20s each
+load: poisson:50
+
+duration: 15s
+timeout_s: 30
+connection_limit: 500
+
+# Optional pre/post hooks — 'module:fn' references.
+# pre_hooks:
+#   - examples.custom_hooks:sign_request
+# post_hooks:
+#   - examples.custom_hooks:extract_result

@@ -1,0 +1,76 @@
+# Benchmark a small SWE-style coding agent over a task list.
+#
+# The agent (examples/coding_agent/coding_agent.py) is a faithful but compact port of
+# mini-swe-agent's control loop: render system + task prompt → model emits a
+# single ```bash``` block → execute → feed observation back → repeat, until
+# the model emits `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` (or limits hit).
+#
+# Required env vars (loaded from .env automatically):
+#   OPENAI_COMPATIBLE_MODEL   — e.g. swiss-ai/Apertus-8B-Instruct-2509
+#   OPENAI_API_BASE_URL       — e.g. https://api.swissai.svc.cscs.ch/v1/
+#   OPENAI_API_KEY            — bearer token (may be unused for local servers)
+#
+# Run:
+#   bench-maker run examples/coding_agent/config.yaml \
+#       --out-dir ./runs --label agent=coding-tiny
+#
+# Outputs in ./runs/<run-id>/:
+#   summary.json   — `workload_metrics.steps.mean` is avg model-call count;
+#                    `correct.mean` is task accuracy; the wrong/failed split
+#                    distinguishes "agent submitted a bad answer" from "agent
+#                    crashed or hit step_limit".
+#   samples.jsonl  — one record per task: prediction, exit_status, cwd, steps.
+
+workload_type:
+  type: agent
+  agent: 'examples.coding_agent.coding_agent:CodingAgent'
+  agent_kwargs:
+    url:     "${OPENAI_API_BASE_URL}chat/completions"
+    model:   "${OPENAI_COMPATIBLE_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    step_limit: 12
+    timeout_per_step_s: 30
+    total_wall_s: 300
+    temperature: 0.1
+    max_tokens: 1024
+
+    # Run each task inside a fresh Flash Sandbox pod (one pod per task,
+    # deleted on teardown). Drop `sandbox_url` to fall back to local
+    # subprocess execution under a tmp dir.
+    sandbox_url: "${FLASH_SANDBOX_URL}"
+    sandbox_spec:
+      type: kubernetes
+      image: alpine:3.20
+      command: ["sh", "-c", "sleep 3600"]
+      cpu_cores: 0.1
+      memory_mb: 128
+    sandbox_ttl_seconds: 600   # server-side safety net if cleanup is skipped
+    sandbox_persistent: true   # use /pshell so `cd` / `export` persist across steps
+    # sandbox_headers:
+    #   Authorization: "Bearer ${SANDBOX_API_KEY}"
+
+    # Local-mode overrides (ignored when `sandbox_url` is set):
+    #   cwd_template: "/tmp/swe-{task_id}"
+    #   keep_cwd: true
+
+# A tiny static list keeps the example self-contained. Swap for a `type: hf`
+# block (e.g. `path: open-thoughts/AgentTrove`, `prompt_field: instruction`,
+# `reference_field: expected_response`) to run a real eval.
+workload:
+  type: static
+  items:
+    - prompt: "Write a one-liner shell command that prints the integers 1 through 5 separated by spaces."
+      reference: "1 2 3 4 5"
+    - prompt: "Compute 17 * 23 and print the result."
+      reference: "391"
+
+load: closed:1
+duration: 10m
+timeout_s: 600
+
+correctness:
+  max_prediction_chars: full
+  scorer:
+    type: exact_match
+    strip: true
+    case_insensitive: true

@@ -1,0 +1,58 @@
+# GSM8K accuracy benchmark, driven by .env (loaded automatically by `bench-maker run`).
+#
+# Required env vars (set in .env or shell):
+#   OPENAI_COMPATIBLE_MODEL   — e.g. swiss-ai/Apertus-8B-Instruct-2509
+#   OPENAI_API_BASE_URL       — e.g. https://api.swissai.svc.cscs.ch/v1/
+#   OPENAI_API_KEY            — bearer token
+#
+# Requires:  pip install -e .[hf]
+#
+# Run:
+#   bench-maker run examples/config_gsm8k_eval.yaml \
+#       --out-dir ./runs --label model=apertus-8b
+#
+# Outputs land in:
+#   ./runs/<run-id>/summary.json   — `workload_metrics.correct.mean` is the GSM8K accuracy
+#   ./runs/<run-id>/samples.jsonl  — one record per request, including the
+#                                    model's raw prediction (under meta.prediction)
+#                                    and the reference (under meta.reference)
+#
+# Without --out-dir, results render to stdout only — no per-request file is
+# written. Always pass --out-dir if you want raw outputs on disk.
+
+workload_type:
+  type: openai
+  url: "${OPENAI_API_BASE_URL}chat/completions"
+  model: "${OPENAI_COMPATIBLE_MODEL}"
+  api_key: "${OPENAI_API_KEY}"
+  max_tokens: 512
+  temperature: 0.1
+
+# Pull GSM8K test split straight from HuggingFace. The `gsm8k` preset
+# wires up question -> prompt and answer -> reference (with the
+# `gsm8k_answer` transform stripping the `#### N` epilogue down to N).
+workload:
+  type: hf
+  preset: gsm8k
+  split: test
+  max_items: 200
+  shuffle: true
+  seed: 0
+
+# Sequential — bumps to e.g. `closed:8` once you want concurrency.
+load: closed:1
+duration: 5m
+timeout_s: 600
+
+# Grade each response: pull the *last* integer out and exact-match the
+# reference. (`regex_match` with the digit pattern is the lightweight
+# version; for a more robust grader use a custom scorer via
+# `factory:` — see docs/eval.md.)
+correctness:
+  # Store the full model output (per request) into samples.jsonl.
+  # Default is 2048 chars; set to "full" / "none" / a smaller int as needed.
+  max_prediction_chars: full
+  scorer:
+    type: regex
+    pattern: '-?\d+'
+    group: 0

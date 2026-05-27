@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bench-maker"
+version = "0.1.0"
+description = "Async HTTP benchmarking utility with pluggable workloads and load models."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Xiaozhe Yao" }]
+license = { text = "MIT" }
+dependencies = [
+    "aiohttp>=3.9",
+    "click>=8.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+rich = ["rich>=13"]
+hf = ["datasets>=2.18"]
+dev = ["pytest>=7", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+benchmaker = "entrypoints.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["benchmaker*", "entrypoints*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+dist/
+build/
+.coverage
+*.json.tmp
+
+# Local environment files — never commit secrets.
+.env
+.env.*
+!.env.example
+runs/
+.local/

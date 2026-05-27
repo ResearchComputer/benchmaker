@@ -1,0 +1,1 @@
+python3 -m sglang.launch_server --model-path /mnt/scratch/xiayao/cache/models/apertus1p5-8b --served-model-name apertus1p5-8b --host 0.0.0.0 --port 3000
