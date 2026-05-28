@@ -43,7 +43,7 @@ it, tar it, share it.
 {
   "run_id": "baseline",
   "bundle_version": 1,
-  "bench_maker_version": "0.3.0",
+  "bench_maker_version": "0.1.0",
   "started_at": "2026-05-26T14:22:33.012345+00:00",
   "ended_at":   "2026-05-26T14:22:43.512345+00:00",
   "wall_time_s": 10.5,

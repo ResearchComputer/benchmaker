@@ -151,7 +151,7 @@ async def test_cli_run_writes_bundle(stub_server: str, tmp_path):
     # Use the installed entrypoint via `python -m`.
     out = subprocess.run(
         [
-            sys.executable, "-m", "entrypoints.cli", "run",
+            sys.executable, "-m", "benchmaker.cli", "run",
             str(cfg_path),
             "--out-dir", str(tmp_path / "runs"),
             "--run-id", "cli-a",
@@ -165,7 +165,7 @@ async def test_cli_run_writes_bundle(stub_server: str, tmp_path):
     # Now run `collect` and check it parses.
     collected = subprocess.run(
         [
-            sys.executable, "-m", "entrypoints.cli", "collect",
+            sys.executable, "-m", "benchmaker.cli", "collect",
             str(tmp_path / "runs"),
             "--format", "csv",
             "--label", "variant",

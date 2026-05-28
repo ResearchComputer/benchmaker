@@ -1,4 +1,4 @@
-# bench-maker
+# benchmaker
 
 Async HTTP benchmarking with pluggable workload-types (protocols), workloads
 (datasets), load models, hooks, and optional periodic monitors.
@@ -25,7 +25,7 @@ pip install -e .
 pip install -e .[dev]   # for tests
 ```
 
-This installs the `benchmaker` Python package and the `bench-maker` CLI.
+This installs the `benchmaker` Python package and the `benchmaker` CLI.
 
 ## 30-second tour
 
@@ -47,8 +47,99 @@ asyncio.run(main())
 Or via the CLI:
 
 ```bash
-bench-maker quick --url https://httpbin.org/get --rate poisson:50 --duration 10s
+benchmaker quick --url https://httpbin.org/get --rate poisson:50 --duration 10s
 ```
+
+## Walkthrough: benchmarking an LLM endpoint with ShareGPT
+
+A realistic LLM benchmark needs a real prompt distribution.
+[ShareGPT V3](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered)
+is a common choice — multi-turn human/assistant conversations scraped from real
+ChatGPT users. A cleaned, benchmark-ready copy is published at
+[`researchcomputer/llmsys-bench`](https://huggingface.co/datasets/researchcomputer/llmsys-bench)
+(`split="sharegpt"`), with one row per conversation:
+
+```json
+{"id": "...", "messages": [{"role": "user", "content": "..."},
+                           {"role": "assistant", "content": "..."},
+                           {"role": "user", "content": "..."}]}
+```
+
+`messages` is the only content field — it's everything a chat benchmark needs.
+Each row is truncated to end on a **user** turn, so it's a valid generation
+request: the server completes the final assistant reply given the prior
+history. Short source conversations collapse to a single user turn (a plain
+single-turn prompt); longer ones carry multi-turn context.
+
+### Load it directly from the Hub
+
+Pull the published split and feed each row's `messages` list straight into the
+chat workload-type (`pip install -e .[hf]`):
+
+```python
+import asyncio
+from datasets import load_dataset
+from benchmaker import (
+    BenchConfig, BenchRunner, OpenAIChatWorkloadType,
+    IterableWorkload, parse_rate_spec,
+)
+
+async def main():
+    ds = load_dataset("researchcomputer/llmsys-bench", split="sharegpt")
+    cfg = BenchConfig(
+        workload_type=OpenAIChatWorkloadType(
+            url="http://localhost:8000/v1/chat/completions",
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            max_tokens=256,
+        ),
+        workload=IterableWorkload(row["messages"] for row in ds),
+        load=parse_rate_spec("poisson:8", duration_s=60),
+        timeout_s=600,
+    )
+    result = await BenchRunner(cfg).run()
+    print(result.summary)
+
+asyncio.run(main())
+```
+
+`OpenAIChatWorkloadType` receives the message list as-is, so single-turn rows
+send one user message and multi-turn rows replay the full history before the
+server generates the final assistant turn. TTFT, inter-token latency, and
+tokens/sec are captured the same way in both cases. URL / model / API key can
+also come from `.env` via `OpenAIChatWorkloadType.from_env(...)`.
+
+### Rebuild or customize it yourself
+
+The published split is produced by `tools/prepare_sharegpt.py`, which downloads
+the upstream JSON once into `.local/` (gitignored) and converts it to the JSONL
+shape above. Run it when you want a subset, different filtering, or a refresh:
+
+```bash
+# Defaults: .local/sharegpt_v3_raw.json  ->  .local/sharegpt_v3.jsonl
+python tools/prepare_sharegpt.py
+
+# A quick subset for smoke tests:
+python tools/prepare_sharegpt.py --max-items 2000
+```
+
+The raw download is ~700 MB. Use `--min-chars` / `--max-chars` to drop empty or
+pathologically long conversations (measured over total message content per
+row). Point any workload at the local file with `JsonlWorkload(path=...,
+field="messages")`, or on the CLI:
+
+```bash
+benchmaker llm \
+    --url   http://localhost:8000/v1/chat/completions \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --prompts-jsonl .local/sharegpt_v3.jsonl \
+    --prompt-field  messages \
+    --max-tokens 256 \
+    --rate poisson:8 --duration 60s \
+    --out-dir ./runs --label dataset=sharegpt
+```
+
+To re-publish after regenerating, `tools/upload_sharegpt_hf.py` pushes the
+JSONL back to the Hub (needs a write token).
 
 ## Documentation
 
@@ -63,6 +154,7 @@ Full docs live in [`docs/`](docs/):
 - [Metrics & output](docs/metrics.md) — summary structure, JSONL dumps
 - [Correctness / accuracy eval](docs/eval.md) — grade responses against references
 - [CLI & YAML reference](docs/cli-and-yaml.md)
+- [ShareGPT benchmark](docs/sharegpt-benchmark.md) — self-contained end-to-end walkthrough
 
 ## Examples
 
@@ -79,12 +171,18 @@ Under [`examples/`](examples/):
 - `config.yaml`           — generic HTTP YAML config
 - `config_llm.yaml`       — LLM YAML config with a Prometheus monitor
 
+Helper scripts under [`tools/`](tools/):
+
+- `prepare_sharegpt.py`   — fetch ShareGPT V3 and convert to a generic JSONL
+- `upload_sharegpt_hf.py` — push the converted JSONL to the HF Hub (write token)
+- `start_local_llm.sh`    — example local SGLang launch command
+
 ## Project layout
 
 ```
-benchmaker/          # library code
-entrypoints/         # CLI (bench-maker)
+benchmaker/          # library code (incl. cli.py — the `benchmaker` CLI)
 examples/            # runnable examples
+tools/               # one-off helper scripts (dataset prep, etc.)
 tests/               # pytest smoke tests
 docs/                # reference docs
 ```

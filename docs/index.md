@@ -43,12 +43,13 @@ A benchmark in benchmaker is the composition of four things:
    LLM-as-judge.
 9. [CLI & YAML reference](cli-and-yaml.md) — `bench-maker quick`,
    `bench-maker run`, full YAML schema.
+10. [ShareGPT benchmark](sharegpt-benchmark.md) — self-contained end-to-end
+    walkthrough: real prompt dataset → OpenAI-compatible endpoint → metrics.
 
 ## Where things live
 
 ```
-benchmaker/        # library code
-entrypoints/       # CLI (bench-maker)
+benchmaker/        # library code (incl. cli.py — the `benchmaker` CLI)
 examples/          # runnable examples
 tests/             # pytest smoke tests
 docs/              # this directory

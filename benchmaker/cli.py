@@ -1,4 +1,4 @@
-"""bench-maker CLI."""
+"""benchmaker CLI."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _write_bundle_if_requested(runner: BenchRunner, source_config: dict,
               type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
               help="Logging level (default: INFO).")
 def main(log_level: str) -> None:
-    """bench-maker: async HTTP benchmarking with pluggable workloads."""
+    """[benchmaker]: async HTTP benchmarking with pluggable workloads."""
     logging.basicConfig(
         level=log_level.upper(),
         format="%(asctime)s [%(name)s] %(message)s",
