@@ -1,0 +1,85 @@
+# Mirror SWE-bench / R2E-Gym images to ghcr.io/swe-images and make them public.
+#
+# IMPORTANT: this workflow must live in the **swe-images/swe-images** repo
+# (copy it to .github/workflows/mirror.yml there). It deliberately pushes with
+# the repo's GITHUB_TOKEN — not a personal PAT — so each package is *connected
+# to this repo* and the token has admin on it, which is the only configuration
+# where the (undocumented) "make public" PATCH has a chance of succeeding.
+#
+# One-time prerequisite (org owner): Org → Settings → Packages → "Package
+# creation" → enable **Public**. Otherwise the visibility flip is rejected.
+#
+# It copies registry→registry with `skopeo` (no Docker daemon, no large local
+# disk) so it fits GitHub-hosted runners, and shards work across a matrix.
+# `publish.py` resumes from the manifest, which is cached between runs.
+
+name: mirror-swe-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: dataset to mirror
+        type: choice
+        default: swe-bench-verified
+        options: [swe-bench-verified, swe-bench, r2e-gym-v1, r2e-gym-lite, all]
+      limit:
+        description: max images per dataset (blank = all)
+        type: string
+        default: "20"
+
+permissions:
+  contents: read
+  packages: write   # lets GITHUB_TOKEN push to ghcr.io/<org> and manage packages
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install skopeo + deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y skopeo
+          python -m pip install --upgrade pip
+          pip install "datasets>=2.18" "swebench>=4.1.0"
+
+      # Pull this tool from the benchmaker repo (adjust the source as needed).
+      - name: Fetch publisher
+        run: |
+          curl -fsSL -o sources.py \
+            https://raw.githubusercontent.com/<you>/benchmaker/main/tools/datasets/publish_swe_images/sources.py
+          curl -fsSL -o publish.py \
+            https://raw.githubusercontent.com/<you>/benchmaker/main/tools/datasets/publish_swe_images/publish.py
+
+      - name: Cache manifest (resume across runs)
+        uses: actions/cache@v4
+        with:
+          path: .local/manifest.jsonl
+          key: mirror-manifest-${{ inputs.dataset }}
+
+      - name: Mirror + make public
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # NOT a PAT — keeps packages repo-connected
+        run: |
+          python publish.py \
+            --dataset "${{ inputs.dataset }}" \
+            --org swe-images \
+            --engine skopeo \
+            --jobs 6 \
+            ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }} \
+            --set-public
+
+# Notes
+# -----
+# * No --repo-link here: skopeo can't set labels, and pushing with GITHUB_TOKEN
+#   already connects each package to this repo — which is what makes --set-public
+#   work. If you also want the "Source" link / inherited README, swap to crane
+#   (install it, use --engine crane --repo-link swe-images/swe-images).
+# * If --set-public still reports 404, the org hasn't enabled public package
+#   creation, or the package isn't connected to this repo. Flip the stragglers
+#   once in the package UI (public → private is irreversible).
+# * For the full datasets (thousands of multi-GB images), shard with a matrix
+#   over instance-id ranges and raise the cache/runner budget accordingly.

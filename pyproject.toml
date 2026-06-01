@@ -13,7 +13,11 @@ license = { text = "MIT" }
 dependencies = [
     "aiohttp>=3.9",
     "click>=8.1",
+    "datasets>=4.8.5",
+    "huggingface-hub>=1.16.4",
+    "pyarrow>=24.0.0",
     "pyyaml>=6.0",
+    "swebench>=4.1.0",
 ]
 
 [project.optional-dependencies]
