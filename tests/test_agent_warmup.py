@@ -1,17 +1,13 @@
 """Unit tests for the warmup-dataset normalizers + SWE-bench pure helpers.
 
-Run from this directory:  pytest test_warmup.py -q
 These cover the format logic only; the live SWE-bench rollout/verify path needs
 flash-sandbox + the swebench package and is not exercised here.
 """
 
 import json
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import protocol as P
-import swebench_runner as S
+from tools.agent_warmup import protocol as P
+from tools.agent_warmup import runner as S
 
 
 # --------------------------- protocol: reasoning --------------------------- #

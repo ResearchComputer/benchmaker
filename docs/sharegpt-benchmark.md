@@ -45,18 +45,18 @@ ds = load_dataset("researchcomputer/llmsys-bench", split="sharegpt")
 
 ### Rebuilding it yourself (optional)
 
-The split is produced by `tools/prepare_sharegpt.py`, which downloads the
+The split is produced by `tools/sharegpt/prepare.py`, which downloads the
 upstream JSON (~700 MB) into `.local/` (gitignored) and converts it. Run it for
 a subset, different filtering, or a refresh:
 
 ```bash
-python tools/prepare_sharegpt.py                 # full -> .local/sharegpt_v3.jsonl
-python tools/prepare_sharegpt.py --max-items 2000   # quick subset
-python tools/prepare_sharegpt.py --min-chars 8 --max-chars 8000
+python tools/sharegpt/prepare.py                 # full -> .local/sharegpt_v3.jsonl
+python tools/sharegpt/prepare.py --max-items 2000   # quick subset
+python tools/sharegpt/prepare.py --min-chars 8 --max-chars 8000
 ```
 
 `--min-chars` / `--max-chars` filter on total message content per row. To
-re-publish after regenerating, `tools/upload_sharegpt_hf.py` pushes the JSONL
+re-publish after regenerating, `tools/sharegpt/upload_hf.py` pushes the JSONL
 back to the Hub (needs a write token).
 
 ## 3. Configure the endpoint
@@ -136,7 +136,7 @@ Always cap the run with `max_requests=` and/or a `duration_s`.
 ## 5. Run it (CLI)
 
 The same thing without writing a script, using a local JSONL (the CLI reads a
-file, not the Hub — rebuild with `prepare_sharegpt.py` first):
+file, not the Hub — rebuild with `tools/sharegpt/prepare.py` first):
 
 ```bash
 benchmaker llm \

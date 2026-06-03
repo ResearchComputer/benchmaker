@@ -23,7 +23,7 @@ from benchmaker import (
     StaticWorkload,
     parse_rate_spec,
 )
-from benchmaker.load import parse_duration
+from benchmaker.core.load import parse_duration
 
 
 # vLLM-specific Prometheus metric names worth tracking.

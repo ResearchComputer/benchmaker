@@ -20,7 +20,7 @@ from benchmaker import (
     StaticWorkload,
     parse_rate_spec,
 )
-from benchmaker.load import parse_duration
+from benchmaker.core.load import parse_duration
 
 
 async def main():

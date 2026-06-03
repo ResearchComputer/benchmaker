@@ -1,5 +1,7 @@
 """Build the agent-warmup SFT dataset.
 
+Run as a module from the repo root: ``python -m tools.agent_warmup.cli <cmd>``.
+
 Two tracks, one canonical JSONL schema (see `protocol.py`):
 
   import-hf   Track A — normalize published trace datasets into warmup rows.
@@ -8,7 +10,7 @@ Two tracks, one canonical JSONL schema (see `protocol.py`):
   generate    Track B — run *our* coding agent (model from `.env`) on SWE-bench
               tasks inside a Flash Sandbox, then run the gold tests. Rows are
               `verified=true` iff the agent's patch resolves the task.
-              (Implemented in `swebench.py`; needs the sandbox orchestrator.)
+              (Implemented in `runner.py`; needs the sandbox orchestrator.)
 
   merge       Concatenate + de-duplicate per-track JSONL files into one dataset.
   stats       Summarize a JSONL dataset (rows, verified split, sources, tools).
@@ -16,17 +18,17 @@ Two tracks, one canonical JSONL schema (see `protocol.py`):
 Examples
 --------
     # Track A: pull all three published sources (subset for a smoke test)
-    python cli.py import-hf claude-reasoning --out .local/claude.jsonl --max-items 200
-    python cli.py import-hf hermes           --out .local/hermes.jsonl
-    python cli.py import-hf pi-traces        --out .local/pi.jsonl
+    python -m tools.agent_warmup.cli import-hf claude-reasoning --out .local/claude.jsonl --max-items 200
+    python -m tools.agent_warmup.cli import-hf hermes           --out .local/hermes.jsonl
+    python -m tools.agent_warmup.cli import-hf pi-traces        --out .local/pi.jsonl
 
     # Track B: generate verified SWE-bench traces (needs flash-sandbox running)
-    python cli.py generate --dataset princeton-nlp/SWE-bench_Verified \\
+    python -m tools.agent_warmup.cli generate --dataset princeton-nlp/SWE-bench_Verified \\
         --split test --num-tasks 50 --out .local/swebench.jsonl
 
     # Combine everything
-    python cli.py merge .local/*.jsonl --out .local/agent_warmup.jsonl
-    python cli.py stats .local/agent_warmup.jsonl
+    python -m tools.agent_warmup.cli merge .local/*.jsonl --out .local/agent_warmup.jsonl
+    python -m tools.agent_warmup.cli stats .local/agent_warmup.jsonl
 """
 
 from __future__ import annotations
@@ -38,9 +40,7 @@ import os
 import sys
 from typing import Any, Callable, Iterator, Optional
 
-# Allow running as a loose script (`python cli.py ...`) without installing.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import protocol as P  # noqa: E402
+from . import protocol as P
 
 
 # --------------------------------------------------------------------------- #
@@ -253,8 +253,8 @@ def cmd_import_hf(args: argparse.Namespace) -> int:
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
-    import swebench_runner
-    return swebench_runner.run_generate(args)
+    from . import runner
+    return runner.run_generate(args)
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +367,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="prepare_agent_warmup",
+        prog="python -m tools.agent_warmup.cli",
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

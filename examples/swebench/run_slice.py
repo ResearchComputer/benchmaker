@@ -4,11 +4,11 @@ A lightweight harness *outside* the benchmaker runner: it picks instances from a
 JSON manifest (a list of raw SWE-bench rows) and prints per-instance pass/fail +
 aggregate pass rate. Each instance boots its prebuilt ghcr eval image and is
 graded authoritatively by the `swebench` package (same flow as the
-`benchmaker run examples/coding_agent/config_swebench.yaml` path, minus the
+`benchmaker run examples/swebench/config_swebench.yaml` path, minus the
 metrics/load/summary machinery).
 
 Run:
-    python examples/coding_agent/run_swe_bench_slice.py /tmp/swe_bench_slice.json
+    python examples/swebench/run_slice.py /tmp/swe_bench_slice.json
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 from benchmaker import AgentContext
-from examples.coding_agent.swe_bench_agent import SWEBenchAgent
+from benchmaker.swebench import SWEBenchAgent
 
 def _load_env(path: str = ".env") -> None:
     """Tiny KEY=VALUE loader so we don't need python-dotenv."""
@@ -98,7 +98,7 @@ def _indent(text: str, prefix: str = "    ") -> str:
 async def main(argv: list[str]) -> int:
     _load_env()
     if len(argv) < 1:
-        print("usage: run_swe_bench_slice.py <slice.json> [--limit N]",
+        print("usage: run_slice.py <slice.json> [--limit N]",
               file=sys.stderr)
         return 2
     slice_path = argv[0]

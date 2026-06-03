@@ -20,9 +20,9 @@ import importlib
 from typing import Any, Callable, Optional
 
 from benchmaker.env import interpolate, load_dotenv
-from benchmaker.load import parse_duration, parse_rate_spec
-from benchmaker.monitors import FunctionMonitor, Monitor, PrometheusMonitor
-from benchmaker.runner import BenchConfig
+from benchmaker.core.load import parse_duration, parse_rate_spec
+from benchmaker.core.monitors import FunctionMonitor, Monitor, PrometheusMonitor
+from benchmaker.core.runner import BenchConfig
 from benchmaker.workloads.base import WorkloadType
 from benchmaker.workloads.datasets import (
     CallableWorkload,
@@ -47,7 +47,7 @@ from benchmaker.workloads.eval import (
     openai_chat_judge,
     regex_match,
 )
-from benchmaker.trace import (
+from benchmaker.core.trace import (
     ReplayWorkloadType,
     TracePacedLoad,
     TraceRecorder,

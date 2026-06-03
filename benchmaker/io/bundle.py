@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from benchmaker.metrics import MetricsAggregator, _safe_meta
+from benchmaker.core.metrics import MetricsAggregator, _safe_meta
 
 
 BUNDLE_VERSION = 1

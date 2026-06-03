@@ -7,7 +7,7 @@ Harbor leans on a registered dataset + an in-sandbox verifier that writes
 - resolve each instance to its prebuilt per-instance eval image (the repo is
   already checked out at ``base_commit`` under ``/testbed`` with deps installed),
   mirrored to the public ghcr ``swe-images`` registry so we dodge Docker Hub
-  rate limits — see ``tools/datasets/publish_swe_images``;
+  rate limits — see ``tools/swe_images``;
 - build the official ``swebench`` ``TestSpec`` (its ``eval_script`` resets the
   test files, applies the hidden ``test_patch``, and runs the tests, plus the
   per-repo log parser);

@@ -1,4 +1,4 @@
-"""Tests for the example CodingAgent.
+"""Tests for the SWE-bench CodingAgent.
 
 Drive the agent with a canned `send_fn` so no real LLM is needed.
 """
@@ -17,7 +17,7 @@ from benchmaker import (
     StaticWorkload,
 )
 from benchmaker.workloads.eval import correctness_hook, exact_match
-from examples.coding_agent.coding_agent import SUBMIT_TOKEN, CodingAgent
+from benchmaker.swebench.agent import SUBMIT_TOKEN, CodingAgent
 
 
 def _canned_send(replies):

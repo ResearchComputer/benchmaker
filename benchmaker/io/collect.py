@@ -17,7 +17,7 @@ import json
 import os
 from typing import Any, Iterable, Optional
 
-from benchmaker.bundle import is_bundle_dir, read_bundle
+from benchmaker.io.bundle import is_bundle_dir, read_bundle
 
 
 # Columns surfaced by default. (Order matters.)

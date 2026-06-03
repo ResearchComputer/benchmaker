@@ -52,7 +52,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Union
 
-from benchmaker.types import (
+from benchmaker.core.types import (
     FireRequest,
     Request,
     Response,

@@ -32,9 +32,9 @@ the request body stays clean (the `id` is kept for provenance, not sent):
     JsonlWorkload(path=".local/sharegpt_v3.jsonl", field="messages")
 
 Usage:
-    python tools/prepare_sharegpt.py                       # default paths
-    python tools/prepare_sharegpt.py --max-items 5000      # subset for fast runs
-    python tools/prepare_sharegpt.py \\
+    python tools/sharegpt/prepare.py                       # default paths
+    python tools/sharegpt/prepare.py --max-items 5000      # subset for fast runs
+    python tools/sharegpt/prepare.py \\
         --raw   .local/sharegpt_v3_raw.json \\
         --out   .local/sharegpt_v3.jsonl \\
         --min-chars 8 --max-chars 16000

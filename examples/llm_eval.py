@@ -45,7 +45,7 @@ from benchmaker import (
     parse_rate_spec,
     regex_match,
 )
-from benchmaker.load import parse_duration
+from benchmaker.core.load import parse_duration
 
 
 def _build_scorer(args):

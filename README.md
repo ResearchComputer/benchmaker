@@ -110,16 +110,16 @@ also come from `.env` via `OpenAIChatWorkloadType.from_env(...)`.
 
 ### Rebuild or customize it yourself
 
-The published split is produced by `tools/prepare_sharegpt.py`, which downloads
+The published split is produced by `tools/sharegpt/prepare.py`, which downloads
 the upstream JSON once into `.local/` (gitignored) and converts it to the JSONL
 shape above. Run it when you want a subset, different filtering, or a refresh:
 
 ```bash
 # Defaults: .local/sharegpt_v3_raw.json  ->  .local/sharegpt_v3.jsonl
-python tools/prepare_sharegpt.py
+python tools/sharegpt/prepare.py
 
 # A quick subset for smoke tests:
-python tools/prepare_sharegpt.py --max-items 2000
+python tools/sharegpt/prepare.py --max-items 2000
 ```
 
 The raw download is ~700 MB. Use `--min-chars` / `--max-chars` to drop empty or
@@ -138,7 +138,7 @@ benchmaker llm \
     --out-dir ./runs --label dataset=sharegpt
 ```
 
-To re-publish after regenerating, `tools/upload_sharegpt_hf.py` pushes the
+To re-publish after regenerating, `tools/sharegpt/upload_hf.py` pushes the
 JSONL back to the Hub (needs a write token).
 
 ## Documentation
@@ -171,18 +171,28 @@ Under [`examples/`](examples/):
 - `config.yaml`           — generic HTTP YAML config
 - `config_llm.yaml`       — LLM YAML config with a Prometheus monitor
 
-Helper scripts under [`tools/`](tools/):
+Helper tooling under [`tools/`](tools/), grouped by purpose:
 
-- `prepare_sharegpt.py`   — fetch ShareGPT V3 and convert to a generic JSONL
-- `upload_sharegpt_hf.py` — push the converted JSONL to the HF Hub (write token)
-- `start_local_llm.sh`    — example local SGLang launch command
+- `sharegpt/`     — `prepare.py` (fetch ShareGPT V3 → JSONL) + `upload_hf.py`
+  (push to the HF Hub with a write token)
+- `swe_images/`   — mirror SWE-bench/R2E-Gym container images to ghcr
+  (`publish.py`) and list the published refs (`pull.py`)
+- `agent_warmup/` — build the agent-warmup SFT dataset
+  (`python -m tools.agent_warmup.cli`)
+- `start_local_llm.sh` — example local SGLang launch command
 
 ## Project layout
 
 ```
-benchmaker/          # library code (incl. cli.py — the `benchmaker` CLI)
-examples/            # runnable examples
-tools/               # one-off helper scripts (dataset prep, etc.)
+benchmaker/          # library code
+  __init__.py        #   public API (re-exports); cli.py — the `benchmaker` CLI
+  config.py  env.py  #   YAML config loading + .env interpolation
+  core/              #   engine: types, load models, runner, metrics, monitors, trace
+  io/                #   run output: per-run bundle + cross-run collection
+  workloads/         #   workload-types (http, llm, sandbox, agent, hf, eval)
+  swebench/          #   SWE-bench coding agent + grading (shared, native)
+examples/            # runnable examples (incl. swebench/ configs + slice runner)
+tools/               # out-of-tree tooling: sharegpt/, swe_images/, agent_warmup/
 tests/               # pytest smoke tests
 docs/                # reference docs
 ```

@@ -1,4 +1,4 @@
-# publish_swe_images
+# swe_images
 
 Mirror the per-instance container images for SWE-bench and R2E-Gym to
 `ghcr.io/<org>` (default org: **`swe-images`**) and make them publicly pullable.
@@ -46,7 +46,7 @@ export GHCR_TOKEN=<PAT with write:packages,read:packages>
 ## Usage
 
 ```bash
-cd tools/datasets/publish_swe_images
+cd tools/swe_images
 
 # 1. Dry run — list targets, write the source→ghcr mapping, copy nothing
 python publish.py --dataset swe-bench-verified --dry-run --mapping-out map.json

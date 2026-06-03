@@ -28,7 +28,7 @@ import json
 import re
 from typing import Any, Awaitable, Callable, Optional, Union
 
-from benchmaker.types import (
+from benchmaker.core.types import (
     PostResponseHook,
     Request,
     Response,

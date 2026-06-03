@@ -30,8 +30,8 @@ import os
 import time
 from typing import Any, Optional
 
-from benchmaker.load import LoadModel
-from benchmaker.types import Request
+from benchmaker.core.load import LoadModel
+from benchmaker.core.types import Request
 from benchmaker.workloads.base import WorkloadType
 from benchmaker.workloads.datasets import Workload
 

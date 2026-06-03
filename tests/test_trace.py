@@ -7,7 +7,7 @@ import tempfile
 import pytest
 
 from benchmaker import BenchConfig, BenchRunner, ConstantRPS, HttpWorkloadType
-from benchmaker.trace import (
+from benchmaker.core.trace import (
     ReplayWorkloadType,
     TracePacedLoad,
     TraceRecorder,
@@ -16,7 +16,7 @@ from benchmaker.trace import (
     request_to_row,
     row_to_request,
 )
-from benchmaker.types import Request
+from benchmaker.core.types import Request
 
 
 def test_row_roundtrip_json_body():

@@ -16,13 +16,13 @@ from benchmaker import (
     is_bundle_dir,
     read_bundle,
 )
-from benchmaker.bundle import (
+from benchmaker.io.bundle import (
     META_FILENAME,
     SUMMARY_FILENAME,
     SAMPLES_FILENAME,
     write_bundle,
 )
-from benchmaker.collect import collect_table, find_bundles, format_table
+from benchmaker.io.collect import collect_table, find_bundles, format_table
 
 
 async def _quick_run(stub_server: str) -> BenchRunner:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from benchmaker.types import Request
+from benchmaker.core.types import Request
 from benchmaker.workloads.base import WorkloadType
 
 

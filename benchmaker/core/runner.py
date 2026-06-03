@@ -13,9 +13,9 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-from benchmaker.load import LoadModel
-from benchmaker.metrics import MetricsAggregator
-from benchmaker.types import (
+from benchmaker.core.load import LoadModel
+from benchmaker.core.metrics import MetricsAggregator
+from benchmaker.core.types import (
     PostResponseHook,
     PreRequestHook,
     Request,
@@ -24,8 +24,8 @@ from benchmaker.types import (
     TicketContext,
     maybe_await,
 )
-from benchmaker.monitors import Monitor, run_monitor_loop
-from benchmaker.trace import TraceRecorder
+from benchmaker.core.monitors import Monitor, run_monitor_loop
+from benchmaker.core.trace import TraceRecorder
 from benchmaker.workloads.base import WorkloadType
 from benchmaker.workloads.datasets import Workload, StaticWorkload
 
@@ -40,7 +40,7 @@ class BenchConfig:
     monitors: list[Monitor] = field(default_factory=list)  # optional periodic samplers
     # Optional trace recorder. When set, each fired request is appended to a
     # JSONL file (with relative timestamp) so a later run can replay the bench
-    # deterministically via `benchmaker.trace.TracePacedLoad` + `ReplayWorkloadType`.
+    # deterministically via `benchmaker.core.trace.TracePacedLoad` + `ReplayWorkloadType`.
     recorder: Optional[TraceRecorder] = None
     connection_limit: int = 1000
     timeout_s: float = 60.0
@@ -248,8 +248,8 @@ class BenchRunner:
             return
 
     def write_bundle(self, out_dir: str, **kwargs) -> str:
-        """Write a per-run directory bundle. See `benchmaker.bundle.write_bundle`."""
-        from benchmaker.bundle import write_bundle
+        """Write a per-run directory bundle. See `benchmaker.io.bundle.write_bundle`."""
+        from benchmaker.io.bundle import write_bundle
         return write_bundle(
             out_dir,
             self.metrics,

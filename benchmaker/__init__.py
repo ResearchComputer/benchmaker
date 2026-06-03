@@ -1,6 +1,6 @@
 """benchmaker: async HTTP benchmarking with pluggable workload-types + workloads (datasets)."""
 
-from benchmaker.types import (
+from benchmaker.core.types import (
     Request,
     Response,
     Sample,
@@ -41,7 +41,7 @@ from benchmaker.workloads.eval import (
     judge_llm,
     openai_chat_judge,
 )
-from benchmaker.load import (
+from benchmaker.core.load import (
     LoadModel,
     ConstantRPS,
     PoissonRPS,
@@ -51,21 +51,21 @@ from benchmaker.load import (
     parse_rate_spec,
 )
 from benchmaker.env import interpolate, load_dotenv
-from benchmaker.monitors import (
+from benchmaker.core.monitors import (
     Monitor,
     FunctionMonitor,
     PrometheusMonitor,
     parse_prometheus,
 )
-from benchmaker.runner import BenchRunner, BenchConfig, BenchResult
-from benchmaker.trace import (
+from benchmaker.core.runner import BenchRunner, BenchConfig, BenchResult
+from benchmaker.core.trace import (
     ReplayWorkloadType,
     TracePacedLoad,
     TraceRecorder,
     TraceWorkload,
     load_trace,
 )
-from benchmaker.bundle import (
+from benchmaker.io.bundle import (
     BUNDLE_VERSION,
     RunMeta,
     default_run_id,

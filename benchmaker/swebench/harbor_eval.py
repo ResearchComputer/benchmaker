@@ -20,16 +20,16 @@ Usage::
 
     # Boot the Flash Sandbox cluster first (see ../../../flash-sandbox/examples/harbor).
     FLASH_SANDBOX_URL=http://localhost:8080 \\
-        python examples/coding_agent/run_harbor_eval.py \\
+        python -m benchmaker.swebench.harbor_eval \\
             --dataset swebench-verified \\
             --agent mini-swe-agent \\
             --model "$OPENAI_COMPATIBLE_MODEL" \\
             --n-tasks 5
 
     # Evaluate *our* wrapped CodingAgent loop through harbor:
-    python examples/coding_agent/run_harbor_eval.py --agent coding-agent --n-tasks 5
+    python -m benchmaker.swebench.harbor_eval --agent coding-agent --n-tasks 5
 
-    python examples/coding_agent/run_harbor_eval.py --list-agents
+    python -m benchmaker.swebench.harbor_eval --list-agents
 
 ``--api-base`` / ``--api-key`` / ``--model`` default to ``OPENAI_API_BASE_URL`` /
 ``OPENAI_API_KEY`` / ``OPENAI_COMPATIBLE_MODEL`` (loaded from a repo-root
@@ -45,11 +45,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Repo root on path so `examples.coding_agent.*` import paths resolve in-process
-# (harbor's AgentFactory imports the custom agent by its module path).
+# Repo root, used only to locate the ``.env`` for default credentials. The
+# custom agent (`benchmaker.swebench.harbor_agent`) is an installed package, so
+# harbor's AgentFactory resolves its import path without any sys.path surgery.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from benchmaker.env import load_dotenv  # noqa: E402
 
@@ -65,7 +64,7 @@ from harbor.models.trial.config import AgentConfig, EnvironmentConfig  # noqa: E
 AGENT_REGISTRY: dict[str, dict[str, str]] = {
     "mini-swe-agent": {"name": "mini-swe-agent"},
     "coding-agent": {
-        "import_path": "examples.coding_agent.harbor_agent:BenchmakerHostAgent",
+        "import_path": "benchmaker.swebench.harbor_agent:BenchmakerHostAgent",
     },
     "claude-code": {"name": "claude-code"},
 }

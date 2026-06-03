@@ -14,7 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from benchmaker.types import Request, Response, Sample, TicketContext, maybe_await
+from benchmaker.core.types import Request, Response, Sample, TicketContext, maybe_await
 
 
 class WorkloadType(ABC):

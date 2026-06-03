@@ -25,7 +25,7 @@ temp dir. Pass ``sandbox_url=`` (e.g. ``https://sandbox.swissai.cscs.ch``) to
 allocate one Flash Sandbox pod per task instead; ``sandbox_spec`` controls the
 pod shape (image, ``cpu_cores``, ``memory_mb``).
 
-YAML wiring lives in ``examples/coding_agent/config.yaml``.
+YAML wiring lives in ``examples/swebench/config.yaml``.
 """
 import re
 import aiohttp

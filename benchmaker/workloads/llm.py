@@ -24,7 +24,7 @@ import statistics
 from typing import Any, Optional, Union
 
 from benchmaker.env import load_dotenv
-from benchmaker.types import Request, Response, Sample
+from benchmaker.core.types import Request, Response, Sample
 from benchmaker.workloads.base import WorkloadType
 
 

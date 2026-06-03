@@ -39,7 +39,7 @@ from benchmaker import (
     correctness_hook,
     parse_rate_spec,
 )
-from benchmaker.load import parse_duration
+from benchmaker.core.load import parse_duration
 
 
 def gsm8k_numeric_scorer() -> Scorer:

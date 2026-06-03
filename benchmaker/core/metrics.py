@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Optional, TextIO
 
-from benchmaker.types import Sample
+from benchmaker.core.types import Sample
 
 
 def _pct(xs: list[float], p: float) -> float:

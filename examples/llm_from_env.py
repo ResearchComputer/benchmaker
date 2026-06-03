@@ -20,7 +20,7 @@ from benchmaker import (
     parse_rate_spec,
 )
 from benchmaker.env import load_dotenv
-from benchmaker.load import parse_duration
+from benchmaker.core.load import parse_duration
 
 
 PROMPTS = [

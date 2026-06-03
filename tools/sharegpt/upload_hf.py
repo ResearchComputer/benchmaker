@@ -1,12 +1,12 @@
 """Upload the converted ShareGPT JSONL to the Hugging Face Hub.
 
-Prereq: run `tools/prepare_sharegpt.py` first to produce the JSONL, and have a
+Prereq: run `tools/sharegpt/prepare.py` first to produce the JSONL, and have a
 **write** token (the env `HF_TOKEN` defaults are often read-only). Provide one
 via any of:
 
     huggingface-cli login           # interactive, cached for future runs
     export HF_TOKEN=hf_xxx           # write token in the environment
-    python tools/upload_sharegpt_hf.py --token hf_xxx
+    python tools/sharegpt/upload_hf.py --token hf_xxx
 
 The dataset lands as `split=sharegpt` under the default config, so consumers do:
 
@@ -14,8 +14,8 @@ The dataset lands as `split=sharegpt` under the default config, so consumers do:
     ds = load_dataset("researchcomputer/llmsys-bench", split="sharegpt")
 
 Usage:
-    python tools/upload_sharegpt_hf.py
-    python tools/upload_sharegpt_hf.py \\
+    python tools/sharegpt/upload_hf.py
+    python tools/sharegpt/upload_hf.py \\
         --jsonl .local/sharegpt_v3.jsonl \\
         --repo  researchcomputer/llmsys-bench \\
         --split sharegpt

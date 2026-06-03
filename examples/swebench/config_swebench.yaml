@@ -14,7 +14,7 @@
 #   FLASH_SANDBOX_URL         — e.g. https://sandbox.swissai.cscs.ch
 #
 # Run (start with a tiny slice via workload.max_items):
-#   benchmaker run examples/coding_agent/config_swebench.yaml \
+#   benchmaker run examples/swebench/config_swebench.yaml \
 #       --out-dir ./runs --label agent=swebench
 #
 # Outputs in ./runs/<run-id>/:
@@ -25,7 +25,7 @@
 
 workload_type:
   type: agent
-  agent: 'examples.coding_agent.swe_bench_agent:SWEBenchAgent'
+  agent: 'benchmaker.swebench.native_eval:SWEBenchAgent'
   # Carry instance_id/repo into Sample.meta for readable per-instance output.
   reference_key: instance_id
   extra_meta_keys: [repo]

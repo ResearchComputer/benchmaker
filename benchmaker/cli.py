@@ -12,7 +12,7 @@ import click
 import yaml
 
 from benchmaker.config import build_config
-from benchmaker.runner import BenchRunner
+from benchmaker.core.runner import BenchRunner
 
 
 # ---------------------------------------------------------------- shared bits
@@ -228,8 +228,8 @@ def llm(url: str | None, model: str | None, api_key: str | None,
         raise click.UsageError("Provide at least one --prompt or --prompts-jsonl.")
 
     from benchmaker.config import build_workload
-    from benchmaker.load import parse_duration, parse_rate_spec
-    from benchmaker.runner import BenchConfig
+    from benchmaker.core.load import parse_duration, parse_rate_spec
+    from benchmaker.core.runner import BenchConfig
     from benchmaker.workloads.llm import OpenAIChatWorkloadType
 
     wt_kwargs: dict[str, Any] = {
@@ -342,7 +342,7 @@ def collect(paths: tuple[str, ...], fmt: str, metrics: tuple[str, ...],
     directory of such run-dirs. With --recursive (default), a non-bundle
     directory is scanned for immediate subdirectories that are bundles.
     """
-    from benchmaker.collect import collect_table, format_table, find_bundles
+    from benchmaker.io.collect import collect_table, format_table, find_bundles
 
     bundle_dirs: list[str] = []
     for p in paths:

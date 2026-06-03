@@ -1,6 +1,6 @@
 # Benchmark a small SWE-style coding agent over a task list.
 #
-# The agent (examples/coding_agent/coding_agent.py) is a faithful but compact port of
+# The agent (benchmaker/swebench/agent.py) is a faithful but compact port of
 # mini-swe-agent's control loop: render system + task prompt → model emits a
 # single ```bash``` block → execute → feed observation back → repeat, until
 # the model emits `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` (or limits hit).
@@ -11,7 +11,7 @@
 #   OPENAI_API_KEY            — bearer token (may be unused for local servers)
 #
 # Run:
-#   bench-maker run examples/coding_agent/config.yaml \
+#   bench-maker run examples/swebench/config.yaml \
 #       --out-dir ./runs --label agent=coding-tiny
 #
 # Outputs in ./runs/<run-id>/:
@@ -23,7 +23,7 @@
 
 workload_type:
   type: agent
-  agent: 'examples.coding_agent.coding_agent:CodingAgent'
+  agent: 'benchmaker.swebench.agent:CodingAgent'
   agent_kwargs:
     url:     "${OPENAI_API_BASE_URL}chat/completions"
     model:   "${OPENAI_COMPATIBLE_MODEL}"

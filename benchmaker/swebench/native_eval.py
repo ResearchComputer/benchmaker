@@ -25,7 +25,7 @@ grades with an in-sandbox verifier. We do the same thing natively:
 An instance counts as a pass (``AgentResult.ok``) iff swebench grades it
 ``RESOLVED_FULL``. Plug this into ``AgentWorkloadType`` for the full benchmaker
 machinery (metrics, load models, summary) — see ``config_swebench.yaml`` — or
-drive it directly via ``run_swe_bench_slice.py``.
+drive it directly via ``examples/swebench/run_slice.py``.
 
 Expected item dict shape (a raw SWE-bench row, or HF form with JSON-string
 test-name fields)::
@@ -54,8 +54,8 @@ from typing import Any, Optional
 import aiohttp
 
 from benchmaker import AgentContext, AgentResult
-from examples.coding_agent.coding_agent import SUBMIT_TOKEN, CodingAgent, _excerpt
-from examples.coding_agent.swe_bench_grading import (
+from benchmaker.swebench.agent import SUBMIT_TOKEN, CodingAgent, _excerpt
+from benchmaker.swebench.grading import (
     DEFAULT_IMAGE_ORG,
     DEFAULT_IMAGE_REGISTRY,
     as_list,

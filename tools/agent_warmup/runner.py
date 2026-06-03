@@ -36,17 +36,13 @@ import base64
 import json
 import os
 import re
-import sys
 from typing import Any, Optional
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-# Repo root (…/benchmaker) so `import benchmaker` works regardless of cwd.
-sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..", "..")))
-import protocol as P  # noqa: E402
+from benchmaker.env import load_dotenv
+from benchmaker.swebench.grading import grade, make_test_spec
+from benchmaker.workloads.agent import Agent, AgentContext, AgentResult
 
-from benchmaker.env import load_dotenv  # noqa: E402
-from benchmaker.workloads.agent import Agent, AgentContext, AgentResult  # noqa: E402
+from . import protocol as P
 
 WORKDIR = "/testbed"
 MAX_TOOL_OUTPUT_CHARS = 4000
@@ -562,21 +558,11 @@ def _truncate(text: str, limit: int) -> str:
 # --------------------------------------------------------------------------- #
 # Verification (uses the swebench package as the source of truth)
 # --------------------------------------------------------------------------- #
-
-
-# Docker Hub namespace for the published SWE-bench per-instance eval images.
-# Passing it makes `instance_image_key` registry-qualified + pullable, e.g.
-# `swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest`.
-SWEBENCH_NAMESPACE = "swebench"
-
-
-def _make_test_spec(instance: dict[str, Any]):
-    # `make_test_spec` moved across swebench versions; try the known locations.
-    try:
-        from swebench.harness.test_spec.test_spec import make_test_spec
-    except ImportError:
-        from swebench.harness.test_spec import make_test_spec  # older layout
-    return make_test_spec(instance, namespace=SWEBENCH_NAMESPACE)
+#
+# Spec-building (`make_test_spec`) and grading (`grade`) are shared with the
+# eval path — see `benchmaker.swebench.grading`. `make_test_spec` uses the
+# Docker Hub `swebench` namespace, so `spec.instance_image_key` is a pullable
+# `swebench/sweb.eval.<arch>.<id>:latest` ref.
 
 
 async def verify_patch(instance: dict[str, Any], model_patch: str,
@@ -593,7 +579,7 @@ async def verify_patch(instance: dict[str, Any], model_patch: str,
         block["error"] = "empty patch"
         return block
     try:
-        spec = _make_test_spec(instance)
+        spec = make_test_spec(instance)
         eval_script = spec.eval_script  # full bash: reset, apply test_patch, run tests
         image_key = spec.instance_image_key
     except Exception as e:
@@ -613,32 +599,10 @@ async def verify_patch(instance: dict[str, Any], model_patch: str,
                 return block
             await sbx.write_file("/tmp/eval.sh", eval_script)
             run = await sbx.exec("bash /tmp/eval.sh 2>&1", timeout=1800)
-            report = _grade(spec, run.get("stdout", ""))
-            block.update(report)
+            block.update(grade(spec, run.get("stdout", "")))
     except Exception as e:
         block["error"] = f"verification run failed: {type(e).__name__}: {e}"
     return block
-
-
-def _grade(spec: Any, log_text: str) -> dict[str, Any]:
-    """Parse the eval log and classify resolution using swebench grading."""
-    from swebench.harness.constants import ResolvedStatus
-    from swebench.harness.grading import get_eval_tests_report, get_resolution_status
-    from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
-
-    parser = MAP_REPO_TO_PARSER[spec.repo]
-    status_map = parser(log_text, spec)  # {test_name: PASSED/FAILED/...}
-    eval_ref = {
-        "FAIL_TO_PASS": spec.FAIL_TO_PASS,
-        "PASS_TO_PASS": spec.PASS_TO_PASS,
-    }
-    report = get_eval_tests_report(status_map, eval_ref)
-    resolved = get_resolution_status(report) == ResolvedStatus.FULL.value
-    return {
-        "resolved": resolved,
-        "fail_to_pass": report.get("FAIL_TO_PASS", {}),
-        "pass_to_pass": report.get("PASS_TO_PASS", {}),
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -661,7 +625,7 @@ def _load_instances(dataset: str, split: str, num_tasks: Optional[int],
 
 def _image_key_for(instance: dict[str, Any]) -> str:
     """Best-effort instance image key (swebench is the source of truth)."""
-    return _make_test_spec(instance).instance_image_key
+    return make_test_spec(instance).instance_image_key
 
 
 def _resolve_image(instance: dict[str, Any],
@@ -674,7 +638,7 @@ def _resolve_image(instance: dict[str, Any],
     *generation* only (no test env), so they can't be verified.
     """
     try:
-        return _make_test_spec(instance).instance_image_key, None
+        return make_test_spec(instance).instance_image_key, None
     except Exception:
         repo = instance.get("repo")
         base = instance.get("base_commit") or instance.get("environment_setup_commit")

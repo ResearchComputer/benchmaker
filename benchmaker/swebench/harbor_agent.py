@@ -14,10 +14,10 @@ Here the executor is ``environment.exec`` anchored at ``cwd`` (default
 ``run_loop`` and ``environment.exec`` are async on the same event loop, there's
 no sync/async bridge to manage.
 
-Plug it into harbor via an import-path agent (see ``run_harbor_eval.py``)::
+Plug it into harbor via an import-path agent (see ``harbor_eval.py``)::
 
     AgentConfig(
-        import_path="examples.coding_agent.harbor_agent:BenchmakerHostAgent",
+        import_path="benchmaker.swebench.harbor_agent:BenchmakerHostAgent",
         model_name="zai-org/GLM-4.7-Flash",
         env={"OPENAI_API_KEY": "...", "OPENAI_API_BASE_URL": "..."},
         kwargs={"step_limit": 40, "cwd": "/testbed"},
@@ -40,9 +40,9 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from examples.coding_agent.coding_agent import CodingAgent, Executor
+from benchmaker.swebench.agent import CodingAgent, Executor
 
-DEFAULT_LOOP_AGENT = "examples.coding_agent.coding_agent:CodingAgent"
+DEFAULT_LOOP_AGENT = "benchmaker.swebench.agent:CodingAgent"
 
 # A SWE-bench-shaped default: the repo is already set up by harbor's environment;
 # the agent just edits source in place and harbor's verifier grades the result.

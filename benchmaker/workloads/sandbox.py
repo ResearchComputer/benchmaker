@@ -72,7 +72,7 @@ from typing import Any, Optional
 
 import aiohttp
 
-from benchmaker.types import Request, Response, Sample, TicketContext, maybe_await
+from benchmaker.core.types import Request, Response, Sample, TicketContext, maybe_await
 from benchmaker.workloads.base import WorkloadType, _estimate_request_size
 
 

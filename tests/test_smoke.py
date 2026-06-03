@@ -24,7 +24,7 @@ from benchmaker import (
     parse_prometheus,
     parse_rate_spec,
 )
-from benchmaker.load import ConstantRPS as _C
+from benchmaker.core.load import ConstantRPS as _C
 
 
 @pytest.mark.asyncio
@@ -214,7 +214,7 @@ def test_parse_rate_spec_variants():
     assert isinstance(parse_rate_spec("100"), _C)
     assert isinstance(parse_rate_spec(100), _C)
     assert isinstance(parse_rate_spec("100rps"), _C)
-    from benchmaker.load import PoissonRPS as _P, ClosedLoop as _CL, Ramp as _R, Sweep as _S
+    from benchmaker.core.load import PoissonRPS as _P, ClosedLoop as _CL, Ramp as _R, Sweep as _S
     assert isinstance(parse_rate_spec("poisson:50"), _P)
     assert isinstance(parse_rate_spec("closed:32"), _CL)
     assert isinstance(parse_rate_spec("concurrency:8"), _CL)

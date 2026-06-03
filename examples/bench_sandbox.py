@@ -13,7 +13,7 @@ def load_images(path: Path) -> list[str]:
     if not path.exists():
         raise SystemExit(
             f"image list not found: {path}\n"
-            f"populate it with: python scripts/pull_swe_images.py --out {path}"
+            f"populate it with: python tools/swe_images/pull.py --out {path}"
         )
     images = [
         line.strip()
