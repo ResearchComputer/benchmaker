@@ -35,6 +35,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 from typing import Any, Optional
 
@@ -207,11 +208,23 @@ class SandboxSession:
 class ChatModel:
     def __init__(self, url: str, model: str, api_key: Optional[str] = None,
                  temperature: float = 0.0, max_tokens: int = 4096,
-                 timeout_s: float = 600.0):
+                 timeout_s: float = 600.0,
+                 chat_template_kwargs: Optional[dict[str, Any]] = None):
         self.url = url
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # Extra kwargs forwarded to the server's chat-template render. On the CSCS
+        # SGLang Kimi-K2.5 deployment we pass {"thinking": False}: with thinking on,
+        # the template renders a tool-followup turn the model completes with an
+        # immediate stop (empty assistant turn). The model emits no reasoning when
+        # `tools` are present anyway, so disabling it loses nothing here.
+        self.chat_template_kwargs = chat_template_kwargs
+        # Learned from the server the first time a request overflows the context
+        # window; once known we clamp `max_tokens` per request so input+completion
+        # always fits (a too-large --max-tokens otherwise 400s every call).
+        self.context_window: Optional[int] = None
+        self._clamp_notified = False
         self._timeout_s = timeout_s
         self._headers = {"Content-Type": "application/json"}
         if api_key:
@@ -242,24 +255,66 @@ class ChatModel:
 
     async def complete(self, messages: list[dict[str, Any]],
                        tools: list[dict[str, Any]]) -> dict[str, Any]:
-        """Return the assistant `message` dict + `usage` from one completion."""
+        """Return the assistant `message` + `usage` + `finish_reason`.
+
+        Robust to an over-large `max_tokens`: the request budget is clamped so
+        input+completion fits the model's context window. The window is learned
+        from the server's context-length 400 (then cached), and as a backstop any
+        such 400 is retried with a budget computed from the error itself.
+        """
         await self._ensure()
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "stream": False,
-        }
-        async with self._session.post(self.url, headers=self._headers, json=body) as r:
-            text = await r.text()
-            if r.status >= 400:
-                raise RuntimeError(f"chat completion failed: HTTP {r.status}: {text}")
-            data = json.loads(text)
-        choice = (data.get("choices") or [{}])[0]
-        return {"message": choice.get("message") or {}, "usage": data.get("usage") or {}}
+        while True:
+            budget = self._completion_budget(messages, tools)
+            body = {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "temperature": self.temperature,
+                "max_tokens": budget,
+                "stream": False,
+            }
+            if self.chat_template_kwargs:
+                body["chat_template_kwargs"] = self.chat_template_kwargs
+            async with self._session.post(self.url, headers=self._headers,
+                                          json=body) as r:
+                text = await r.text()
+                status = r.status
+            if status < 400:
+                data = json.loads(text)
+                choice = (data.get("choices") or [{}])[0]
+                return {"message": choice.get("message") or {},
+                        "usage": data.get("usage") or {},
+                        "finish_reason": choice.get("finish_reason")}
+            over = _parse_context_overflow(text)
+            if over is not None:
+                ctx, n_input = over
+                self.context_window = ctx  # learn it for future proactive clamps
+                safe = ctx - n_input - _COMPLETION_MARGIN
+                if safe < _MIN_COMPLETION:
+                    raise RuntimeError(
+                        f"prompt too long: {n_input} input tokens leave only "
+                        f"{safe} of the {ctx}-token context for a completion")
+                if safe < budget:
+                    self._notify_clamp(ctx)
+                    continue  # retry with the now-known window applied
+            raise RuntimeError(f"chat completion failed: HTTP {status}: {text}")
+
+    def _completion_budget(self, messages: list[dict[str, Any]],
+                           tools: list[dict[str, Any]]) -> int:
+        """`max_tokens` clamped so input+completion fits the context window."""
+        if not self.context_window:
+            return self.max_tokens
+        est_input = _estimate_tokens(messages) + _estimate_tokens(tools)
+        room = self.context_window - est_input - _COMPLETION_MARGIN
+        return max(_MIN_COMPLETION, min(self.max_tokens, room))
+
+    def _notify_clamp(self, ctx: int) -> None:
+        if not self._clamp_notified:
+            self._clamp_notified = True
+            print(f"[generate] --max-tokens {self.max_tokens} exceeds the model's "
+                  f"{ctx}-token context; clamping the completion budget per request "
+                  f"to fit. Pass a smaller --max-tokens (e.g. 8192) to silence this.")
 
     async def aclose(self) -> None:
         if self._session is not None:
@@ -295,6 +350,8 @@ class CodingAgent(Agent):
         submitted = False
         turns = 0
         usage_total = {"prompt": 0, "completion": 0}
+        request_error: Optional[str] = None
+        nudged_this_turn = False
 
         async with SandboxSession(self.sandbox_base, spec, cwd=WORKDIR) as sbx:
             # Setup (e.g. clone the repo for non-swebench images). Run unanchored
@@ -319,11 +376,43 @@ class CodingAgent(Agent):
                 msg, usage = out["message"], out["usage"]
                 usage_total["prompt"] += int(usage.get("prompt_tokens") or 0)
                 usage_total["completion"] += int(usage.get("completion_tokens") or 0)
+                fr = out.get("finish_reason")
+
+                # An assistant turn with no visible content AND no tool_calls is a
+                # degenerate completion. Two distinct causes, handled differently:
+                #
+                #  * finish_reason="length": the model truncated mid-output (e.g. a
+                #    reasoning model that spent the whole budget thinking). A retry
+                #    would just truncate again — fail with an actionable error.
+                #  * otherwise (typically "stop"): the thinking-mode chat-template
+                #    bug on the CSCS Kimi-K2.5 SGLang deployment — a history ending
+                #    in a `tool` message renders a prompt the model completes with an
+                #    immediate stop. The primary fix is chat_template_kwargs
+                #    {"thinking": False} (see ChatModel / --thinking); this nudge is a
+                #    model-agnostic backstop: ANY further message unsticks it, so we
+                #    retry once with a throwaway `user` nudge. The nudge goes into the
+                #    prompt ONLY, never the recorded trajectory, so SFT data stays
+                #    canonical.
+                if _is_empty_turn(msg):
+                    if fr != "length" and not nudged_this_turn:
+                        api_messages.append({"role": "user", "content": _NUDGE})
+                        nudged_this_turn = True
+                        continue  # re-complete with the nudge appended
+                    request_error = (
+                        f"empty assistant turn at turn {turns} "
+                        f"(finish_reason={fr!r}); "
+                        + ("hit max_tokens mid-output — raise --max-tokens"
+                           if fr == "length"
+                           else "model returned no content or tool_call even after "
+                                "a continuation nudge"))
+                    break
+                nudged_this_turn = False
 
                 api_messages.append(_strip_for_api(msg))
                 record_messages.append(_to_record_assistant(msg))
 
                 tool_calls = msg.get("tool_calls") or []
+
                 if not tool_calls:
                     break  # model answered with no tool call -> done
 
@@ -350,7 +439,8 @@ class CodingAgent(Agent):
         return AgentResult(
             output=patch,
             ok=submitted,
-            request_ok=True,
+            request_ok=request_error is None,
+            error=request_error,
             meta={
                 "messages": record_messages,
                 "model_patch": patch,
@@ -374,6 +464,44 @@ class CodingAgent(Agent):
 # --------------------------------------------------------------------------- #
 # Pure helpers (unit-tested)
 # --------------------------------------------------------------------------- #
+
+
+# Throwaway prompt-only message used to unstick servers whose chat template
+# emits an empty assistant turn after a `tool` message (see the loop in `run`).
+_NUDGE = "Continue."
+
+# Context-budget guardrails (see ChatModel.complete). Keep a little headroom
+# below the window, and never request a uselessly tiny completion.
+_COMPLETION_MARGIN = 512
+_MIN_COMPLETION = 256
+
+# Matches the server's context-length 400 body, e.g. "... maximum context length
+# of 262144 tokens. You requested a total of 263717 tokens: 3717 tokens from the
+# input messages and 260000 tokens for the completion."
+_CTX_OVERFLOW_RE = re.compile(
+    r"maximum context length of (\d+) tokens.*?(\d+) tokens from the input",
+    re.DOTALL)
+
+
+def _parse_context_overflow(body: str) -> Optional[tuple[int, int]]:
+    """(context_window, input_tokens) from a context-length 400 body, else None."""
+    m = _CTX_OVERFLOW_RE.search(body)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _estimate_tokens(obj: Any) -> int:
+    """Cheap upper-ish estimate of how many tokens `obj` serializes to.
+
+    Only used to pre-clamp the completion budget so we rarely round-trip a 400;
+    the server's error is the source of truth, so a rough ~3 chars/token (which
+    tends to over-count, leaving extra headroom) is fine.
+    """
+    return len(json.dumps(obj, ensure_ascii=False)) // 3
+
+
+def _is_empty_turn(msg: dict[str, Any]) -> bool:
+    """True when an assistant message carries no usable content and no tool_calls."""
+    return not (msg.get("content") or "").strip() and not (msg.get("tool_calls") or [])
 
 
 def _parse_tool_call(tc: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -575,6 +703,23 @@ def _default_env() -> str:
     return os.path.join(os.path.abspath(os.path.join(_HERE, "..", "..", "..")), ".env")
 
 
+def _thinking_kwargs(args: argparse.Namespace) -> Optional[dict[str, Any]]:
+    """chat_template_kwargs implied by --thinking (None = send nothing).
+
+    `auto` disables thinking for Kimi models, where thinking-mode + tool calls
+    makes the SGLang template emit empty assistant turns after a tool result
+    (see ChatModel). Other models are left untouched.
+    """
+    mode = getattr(args, "thinking", "auto")
+    if mode == "on":
+        return None
+    if mode == "off":
+        return {"thinking": False}
+    model = (args.model or os.environ.get("OPENAI_COMPATIBLE_MODEL")
+             or os.environ.get("OPENAI_MODEL") or "")
+    return {"thinking": False} if "kimi" in model.lower() else None
+
+
 def _load_done_ids(out_path: str) -> set[str]:
     """Instance ids already present in an existing output file (for --resume).
 
@@ -606,7 +751,8 @@ async def _run_async(args: argparse.Namespace) -> int:
     if not sandbox_base:
         raise SystemExit("FLASH_SANDBOX_URL not set (need the sandbox service).")
 
-    model = ChatModel.from_env(env_path, args.model)
+    model = ChatModel.from_env(env_path, args.model, max_tokens=args.max_tokens,
+                               chat_template_kwargs=_thinking_kwargs(args))
     instances = _load_instances(args.dataset, args.split, args.num_tasks,
                                 args.instance_ids)
 

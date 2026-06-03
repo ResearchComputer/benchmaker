@@ -389,7 +389,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen.add_argument("--instance-ids", nargs="+", default=None)
     p_gen.add_argument("--concurrency", type=int, default=4)
     p_gen.add_argument("--max-turns", type=int, default=50)
-    p_gen.add_argument("--sandbox-type", default="kubernetes",
+    p_gen.add_argument("--max-tokens", type=int, default=8192,
+                       help="max_tokens per completion. Too small truncates a turn "
+                            "mid-output (dropped trajectory); too large is clamped "
+                            "automatically to fit the model's context window, so "
+                            "there's no point setting it near the context size "
+                            "(8192 is plenty for these agent turns).")
+    p_gen.add_argument("--sandbox-type", default="docker",
                        help="Flash Sandbox backend (CSCS service is 'kubernetes')")
     p_gen.add_argument("--skip-verification", action="store_true",
                        help="don't run tests; emit unverified trajectories "
@@ -400,6 +406,12 @@ def build_parser() -> argparse.ArgumentParser:
                             "repo is cloned at base_commit (used with "
                             "--skip-verification)")
     p_gen.add_argument("--model", default=None, help="override OPENAI_COMPATIBLE_MODEL")
+    p_gen.add_argument("--thinking", choices=["auto", "on", "off"], default="auto",
+                       help="send chat_template_kwargs thinking flag. 'off' disables "
+                            "reasoning (recommended for Kimi-K2.5 + tools: thinking "
+                            "on makes the SGLang template emit empty turns after a "
+                            "tool result). 'auto' = off for kimi* models, else "
+                            "unset. 'on' leaves it unset (relies on the nudge).")
     p_gen.add_argument("--keep-unverified", action="store_true",
                        help="also write rows whose patch failed the tests")
     p_gen.add_argument("--resume", action="store_true",

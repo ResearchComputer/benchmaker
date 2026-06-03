@@ -1,9 +1,11 @@
 """Run a small SWE-bench Verified slice through SWEBenchAgent + Flash Sandbox.
 
-Picks instances from a JSON manifest (use `prepare_slice.py` or the snippet in
-the README to generate one) and prints per-instance pass/fail + aggregate pass
-rate. This is a smoke check, NOT the official SWE-bench score — see the
-docstring of `swe_bench_agent.py` for caveats.
+A lightweight harness *outside* the benchmaker runner: it picks instances from a
+JSON manifest (a list of raw SWE-bench rows) and prints per-instance pass/fail +
+aggregate pass rate. Each instance boots its prebuilt ghcr eval image and is
+graded authoritatively by the `swebench` package (same flow as the
+`benchmaker run examples/coding_agent/config_swebench.yaml` path, minus the
+metrics/load/summary machinery).
 
 Run:
     python examples/coding_agent/run_swe_bench_slice.py /tmp/swe_bench_slice.json
@@ -17,10 +19,8 @@ import os
 import sys
 import time
 from pathlib import Path
-
 from benchmaker import AgentContext
 from examples.coding_agent.swe_bench_agent import SWEBenchAgent
-
 
 def _load_env(path: str = ".env") -> None:
     """Tiny KEY=VALUE loader so we don't need python-dotenv."""
@@ -33,7 +33,6 @@ def _load_env(path: str = ".env") -> None:
             continue
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip())
-
 
 async def run_one(agent: SWEBenchAgent, instance: dict,
                   trajectories_dir: Path) -> dict:
@@ -56,42 +55,39 @@ async def run_one(agent: SWEBenchAgent, instance: dict,
 
     elapsed = time.monotonic() - t0
     meta, mx = result.meta, result.metrics
-    # Save the model trajectory for diagnosis.
+    # Save the model trajectory + extracted patch for diagnosis.
     if getattr(agent, "last_messages", None):
         trajectories_dir.mkdir(parents=True, exist_ok=True)
         out_path = trajectories_dir / f"{instance_id}.json"
         out_path.write_text(json.dumps({
             "instance_id": instance_id,
             "exit_status": meta.get("exit_status"),
-            "submission": result.output,
+            "model_patch": result.output,
             "messages": agent.last_messages,
         }, indent=2))
         print(f"  trajectory: {out_path}", flush=True)
-    print(f"  exit_status={meta['exit_status']}  bootstrap_ok={meta['bootstrap_ok']}"
-          f"  diff={meta['submitted_diff']}  applied={meta['pred_patch_applied']}",
+    print(f"  exit_status={meta['exit_status']}  image={meta.get('image')}"
+          f"  submitted={meta.get('submitted')}  resolved={meta.get('resolved')}",
           flush=True)
     print(f"  steps={int(mx['steps'])} actions={int(mx['actions'])}  "
           f"F2P {int(mx['f2p_pass'])}/{int(mx['f2p_total'])}  "
           f"P2P {int(mx['p2p_pass'])}/{int(mx['p2p_total'])}  "
-          f"elapsed={elapsed:.1f}s", flush=True)
-    if not meta["bootstrap_ok"]:
-        tail = meta.get("bootstrap_log_tail") or ""
-        print(f"  bootstrap_log_tail:\n{_indent(tail)}", flush=True)
-    if meta.get("grading_log_tail"):
-        print(f"  grading_log_tail:\n{_indent(meta['grading_log_tail'])}",
-              flush=True)
+          f"patch={int(mx['patch_chars'])}c  elapsed={elapsed:.1f}s", flush=True)
+    if meta.get("grading_error"):
+        print(f"  grading_error: {meta['grading_error']}", flush=True)
+    if meta.get("apply_log_tail"):
+        print(f"  apply_log_tail:\n{_indent(meta['apply_log_tail'])}", flush=True)
     return {
         "instance_id": instance_id, "ok": result.ok,
         "exit_status": meta["exit_status"],
-        "bootstrap_ok": meta["bootstrap_ok"],
-        "submitted_diff": meta["submitted_diff"],
-        "pred_patch_applied": meta["pred_patch_applied"],
+        "image": meta.get("image"),
+        "submitted": meta.get("submitted"),
+        "resolved": meta.get("resolved"),
         "f2p_pass": int(mx["f2p_pass"]), "f2p_total": int(mx["f2p_total"]),
         "p2p_pass": int(mx["p2p_pass"]), "p2p_total": int(mx["p2p_total"]),
-        "f2p_outcomes": meta.get("f2p_outcomes") or {},
-        "p2p_outcomes": meta.get("p2p_outcomes") or {},
+        "grading_error": meta.get("grading_error"),
         "elapsed_s": elapsed,
-        "output_head": (result.output or "")[:600],
+        "patch_head": (result.output or "")[:600],
     }
 
 
@@ -125,16 +121,21 @@ async def main(argv: list[str]) -> int:
         url=base_url.rstrip("/") + "/chat/completions",
         model=model,
         api_key=api_key,
-        step_limit=20,
-        timeout_per_step_s=60,
-        total_wall_s=900,
-        temperature=0.1,
-        max_tokens=2048,
+        step_limit=40,
+        timeout_per_step_s=120,
+        total_wall_s=2400,
+        temperature=0.0,
+        max_tokens=4096,
         sandbox_url=sandbox_url,
-        sandbox_spec={"cpu_cores": 1.0, "memory_mb": 2048},
-        sandbox_ttl_seconds=1200,
-        bootstrap_timeout_s=600,
-        pytest_timeout_s=300,
+        sandbox_type="kubernetes",
+        cpu_cores=2.0,
+        memory_mb=4096,
+        sandbox_ttl_seconds=3600,
+        # Per-instance eval images from the ghcr swe-images mirror.
+        image_org="swe-images",
+        image_registry="ghcr.io",
+        grade=True,
+        eval_timeout_s=1800,
         create_retry_attempts=20,
         create_retry_delay_s=8.0,
     )

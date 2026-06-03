@@ -27,19 +27,37 @@ pod shape (image, ``cpu_cores``, ``memory_mb``).
 
 YAML wiring lives in ``examples/coding_agent/config.yaml``.
 """
-import asyncio
-import os
 import re
+import aiohttp
+import os
+import asyncio
 import tempfile
 import time
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
-
-import aiohttp
-
 from benchmaker import Agent, AgentContext, AgentResult
 
 
 SUBMIT_TOKEN = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+
+# An executor runs one shell action and returns (returncode, combined-output).
+# This is the seam that decouples the agent *loop* from *where* commands run — a
+# local subprocess, a benchmaker Flash Sandbox pod, or a harbor environment.
+# Plug a different executor in and the same loop drives a different backend.
+Executor = Callable[[str, float], Awaitable[tuple[int, str]]]
+
+
+@dataclass
+class LoopResult:
+    """Outcome of one ``run_loop`` trajectory (backend-agnostic)."""
+
+    submission: Optional[str]
+    exit_status: str
+    n_calls: int
+    n_actions: int
+    elapsed_s: float
+    messages: list[dict] = field(default_factory=list)
 
 SYSTEM_PROMPT = """You are a senior software engineer working in a fresh shell.
 
@@ -79,7 +97,6 @@ SendFn = Callable[[list[dict]], Awaitable[str]]
 
 
 _DEFAULT_SANDBOX_SPEC: dict[str, Any] = {
-    "type": "kubernetes",
     "image": "alpine:3.20",
     "command": ["sh", "-c", "sleep 3600"],
     "cpu_cores": 0.1,
@@ -256,6 +273,7 @@ class CodingAgent(Agent):
         sess = await self._ensure_session()
         url = f"{self._sandbox_url}{self._sandbox_prefix}"
         timeout = aiohttp.ClientTimeout(total=self._sandbox_create_timeout_s)
+        print(f"Creating sandbox with spec {body} at {url}", flush=True)
         async with sess.post(url, headers=self._sandbox_headers,
                              json=body, timeout=timeout) as resp:
             text = await resp.text()
@@ -337,6 +355,79 @@ class CodingAgent(Agent):
 
     # ---- main loop ---------------------------------------------------- #
 
+    async def run_loop(
+        self,
+        task: str,
+        executor: Executor,
+        *,
+        system_prompt: Optional[str] = None,
+        instance_template: Optional[str] = None,
+    ) -> LoopResult:
+        """Drive the model/observe loop against an injected ``executor``.
+
+        This is the backend-agnostic core: it owns the conversation, action
+        parsing, and halting (submission / no-action / step-limit / time-limit),
+        but runs every shell action through ``executor`` instead of a hard-wired
+        backend. ``CodingAgent.run`` wires in a local-subprocess or Flash Sandbox
+        executor; a harbor ``BaseAgent`` can wire in ``environment.exec`` — same
+        loop, different host. See ``harbor_agent.py``.
+
+        ``executor`` is ``async (action, timeout_s) -> (returncode, output)``.
+        Sandbox / workspace lifecycle is the *caller's* responsibility.
+        """
+        sys_p = system_prompt if system_prompt is not None else self._system_prompt
+        inst_t = (instance_template if instance_template is not None
+                  else self._instance_template)
+        messages: list[dict] = [
+            {"role": "system", "content": sys_p},
+            {"role": "user", "content": inst_t.format(task=task)},
+        ]
+        start = time.monotonic()
+        n_calls = 0
+        n_actions = 0
+        submission: Optional[str] = None
+        exit_status = "step_limit"
+
+        while True:
+            if n_calls >= self._step_limit:
+                exit_status = "step_limit"
+                break
+            if time.monotonic() - start > self._total_wall_s:
+                exit_status = "time_limit"
+                break
+
+            reply = await self._send(messages)
+            n_calls += 1
+            messages.append({"role": "assistant", "content": reply})
+
+            action = self._parse_action(reply)
+            if action is None:
+                exit_status = "no_action"
+                break
+
+            first_line = action.splitlines()[0].strip() if action.strip() else ""
+            if first_line == SUBMIT_TOKEN:
+                submission = "\n".join(action.splitlines()[1:]).strip()
+                exit_status = "submitted"
+                break
+
+            rc, output = await executor(action, self._timeout_per_step_s)
+            n_actions += 1
+            obs = self._truncate(output)
+            messages.append({
+                "role": "user",
+                "content": f"$ {action}\nreturncode: {rc}\n```\n{obs}\n```",
+            })
+
+        return LoopResult(
+            submission=submission,
+            exit_status=exit_status,
+            n_calls=n_calls,
+            n_actions=n_actions,
+            elapsed_s=time.monotonic() - start,
+            messages=messages,
+        )
+
     async def run(self, ctx: AgentContext) -> AgentResult:
         item = ctx.item if isinstance(ctx.item, dict) else {}
         task = item.get("prompt") or item.get("instruction") or ""
@@ -346,54 +437,15 @@ class CodingAgent(Agent):
         sandbox_id: Optional[str] = None
         if self._sandbox_url:
             sandbox_id = await self._sandbox_create()
+            async def executor(action: str, _timeout: float) -> tuple[int, str]:
+                return await self._sandbox_exec(sandbox_id, action)
         else:
             cwd, owned = self._resolve_cwd(ctx.item)
-
-        messages: list[dict] = [
-            {"role": "system", "content": self._system_prompt},
-            {"role": "user",
-             "content": self._instance_template.format(task=task)},
-        ]
-        start = time.monotonic()
-        n_calls = 0
-        n_actions = 0
-        submission: Optional[str] = None
-        exit_status = "step_limit"
+            async def executor(action: str, _timeout: float) -> tuple[int, str]:
+                return await self._bash(action, cwd)
 
         try:
-            while True:
-                if n_calls >= self._step_limit:
-                    exit_status = "step_limit"
-                    break
-                if time.monotonic() - start > self._total_wall_s:
-                    exit_status = "time_limit"
-                    break
-
-                reply = await self._send(messages)
-                n_calls += 1
-                messages.append({"role": "assistant", "content": reply})
-
-                action = self._parse_action(reply)
-                if action is None:
-                    exit_status = "no_action"
-                    break
-
-                first_line = action.splitlines()[0].strip() if action.strip() else ""
-                if first_line == SUBMIT_TOKEN:
-                    submission = "\n".join(action.splitlines()[1:]).strip()
-                    exit_status = "submitted"
-                    break
-
-                if sandbox_id is not None:
-                    rc, output = await self._sandbox_exec(sandbox_id, action)
-                else:
-                    rc, output = await self._bash(action, cwd)
-                n_actions += 1
-                obs = self._truncate(output)
-                messages.append({
-                    "role": "user",
-                    "content": f"$ {action}\nreturncode: {rc}\n```\n{obs}\n```",
-                })
+            result = await self.run_loop(task, executor)
         finally:
             if sandbox_id is not None:
                 await self._sandbox_delete(sandbox_id)
@@ -402,18 +454,17 @@ class CodingAgent(Agent):
                 import shutil
                 shutil.rmtree(cwd, ignore_errors=True)
 
-        elapsed = time.monotonic() - start
         return AgentResult(
-            output=(submission or "").strip(),
-            ok=(exit_status == "submitted"),
-            error=None if exit_status == "submitted" else exit_status,
+            output=(result.submission or "").strip(),
+            ok=(result.exit_status == "submitted"),
+            error=None if result.exit_status == "submitted" else result.exit_status,
             metrics={
-                "steps": float(n_calls),
-                "actions": float(n_actions),
-                "elapsed_s": float(elapsed),
+                "steps": float(result.n_calls),
+                "actions": float(result.n_actions),
+                "elapsed_s": float(result.elapsed_s),
             },
             meta={
-                "exit_status": exit_status,
+                "exit_status": result.exit_status,
                 "cwd": cwd,
                 "sandbox_id": sandbox_id,
                 "task_id": item.get("task_id"),

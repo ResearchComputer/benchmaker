@@ -53,11 +53,15 @@ jobs:
           curl -fsSL -o publish.py \
             https://raw.githubusercontent.com/<you>/benchmaker/main/tools/datasets/publish_swe_images/publish.py
 
+      # per-run key + restore-keys so each run persists its incremental progress
+      # (cache entries are immutable — a static key only ever saves run #1)
       - name: Cache manifest (resume across runs)
         uses: actions/cache@v4
         with:
           path: .local/manifest.jsonl
-          key: mirror-manifest-${{ inputs.dataset }}
+          key: mirror-manifest-${{ inputs.dataset }}-${{ github.run_id }}
+          restore-keys: |
+            mirror-manifest-${{ inputs.dataset }}-
 
       - name: Mirror + make public
         env:
@@ -69,6 +73,7 @@ jobs:
             --org swe-images \
             --engine skopeo \
             --jobs 6 \
+            --skip-existing \
             ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }} \
             --set-public
 
