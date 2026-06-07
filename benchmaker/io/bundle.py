@@ -8,7 +8,7 @@ Each benchmark run writes a directory:
         samples.jsonl   # one record per request
         monitors.jsonl  # one record per monitor tick
 
-The bundle is the unit of result interchange. `bench-maker collect` walks
+The bundle is the unit of result interchange. `benchmaker collect` walks
 one or more such directories and pivots the summaries into a table.
 """
 

@@ -14,7 +14,7 @@ The upstream file is a single big JSON array. Each element looks like:
         ]
     }
 
-This script normalises each conversation into a row shaped for bench-maker's
+This script normalises each conversation into a row shaped for benchmaker's
 OpenAI chat workload-type:
 
     {"id": "...", "messages": [{"role": "user", "content": "..."},

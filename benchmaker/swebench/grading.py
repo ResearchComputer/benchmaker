@@ -23,12 +23,44 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# ghcr mirror of the SWE-bench per-instance images. The publish tool maps a
-# source ``swebench/sweb.eval.<arch>.<id>`` to ``ghcr.io/<org>/sweb.eval.<arch>.<id>``
-# (registry + first namespace dropped), so we construct the mirror ref directly
-# from the instance id rather than rewriting swebench's Docker Hub key.
-DEFAULT_IMAGE_ORG = "swe-images"
-DEFAULT_IMAGE_REGISTRY = "ghcr.io"
+# Sources of prebuilt per-instance eval images on ghcr. Each is a "mirror"
+# preset describing how to construct the image ref from a raw SWE-bench
+# instance id. We build the ref directly rather than rewriting swebench's
+# Docker Hub key, because the two public mirrors disagree on both the image
+# name and whether the instance id is normalised:
+#
+#   swe-images      Our own mirror of swebench's *official* Docker Hub images,
+#                   preserving swebench's normalised key (lower-case,
+#                   ``__`` -> ``_1776_``): ``swebench/sweb.eval.<arch>.<id>`` ->
+#                   ``ghcr.io/swe-images/sweb.eval.<arch>.<id>``. Default,
+#                   because these are the exact images the dataset was generated
+#                   from — their pytest/test-id rendering matches the dataset's
+#                   FAIL_TO_PASS / PASS_TO_PASS strings, so grading is faithful.
+#   epoch-research  Epoch AI's public, MIT-licensed eval images. Named with the
+#                   RAW instance id (e.g. ``swe-bench.eval.x86_64.astropy__
+#                   astropy-13236``); no ``_1776_`` normalisation. Covers
+#                   2290/2294 of the *full* set on x86_64 (swe-images only
+#                   mirrors what swebench publishes), but they are *rebuilt*, so
+#                   package versions can drift from the official images and
+#                   shift parametrised test-node-ids (e.g. ``[]`` -> ``[unit0]``),
+#                   silently failing PASS_TO_PASS matches. Prefer only when you
+#                   need full-set coverage and accept that risk.
+IMAGE_MIRRORS: dict[str, dict[str, Any]] = {
+    "swe-images": {
+        "registry": "ghcr.io",
+        "org": "swe-images",
+        "name": "sweb.eval",
+        "normalize": True,
+    },
+    "epoch-research": {
+        "registry": "ghcr.io",
+        "org": "epoch-research",
+        "name": "swe-bench.eval",
+        "normalize": False,
+    },
+}
+
+DEFAULT_IMAGE_MIRROR = "swe-images"
 
 # swebench's namespace for *Docker Hub* image keys. We only pass it to
 # ``make_test_spec`` so the spec resolves cleanly; we don't use the resulting
@@ -44,13 +76,32 @@ def normalise_instance_id(instance_id: str) -> str:
 def instance_image_key(
     instance_id: str,
     *,
-    org: str = DEFAULT_IMAGE_ORG,
-    registry: str = DEFAULT_IMAGE_REGISTRY,
+    mirror: str = DEFAULT_IMAGE_MIRROR,
     arch: str = "x86_64",
+    org: str | None = None,
+    registry: str | None = None,
+    name: str | None = None,
+    normalize: bool | None = None,
 ) -> str:
-    """Return the ghcr mirror ref for an instance's prebuilt eval image."""
-    norm = normalise_instance_id(instance_id)
-    return f"{registry}/{org}/sweb.eval.{arch}.{norm}:latest"
+    """Return the ghcr ref for an instance's prebuilt eval image.
+
+    ``mirror`` selects a preset from :data:`IMAGE_MIRRORS` (``epoch-research``
+    by default, or ``swe-images``). The explicit ``org``/``registry``/``name``/
+    ``normalize`` kwargs override individual preset fields when ``not None``, so
+    a custom registry can reuse a preset's naming convention.
+    """
+    preset = IMAGE_MIRRORS.get(mirror)
+    if preset is None:
+        raise ValueError(
+            f"unknown image mirror {mirror!r}; "
+            f"choose one of {sorted(IMAGE_MIRRORS)}"
+        )
+    registry = preset["registry"] if registry is None else registry
+    org = preset["org"] if org is None else org
+    name = preset["name"] if name is None else name
+    normalize = preset["normalize"] if normalize is None else normalize
+    iid = normalise_instance_id(instance_id) if normalize else instance_id
+    return f"{registry}/{org}/{name}.{arch}.{iid}:latest"
 
 
 def make_test_spec(instance: dict[str, Any]) -> Any:

@@ -6,54 +6,19 @@ import asyncio
 import json
 import logging
 import sys
-from typing import Any
 
 import click
 import yaml
 
 from benchmaker.config import build_config
 from benchmaker.core.runner import BenchRunner
-
-
-# ---------------------------------------------------------------- shared bits
-
-
-def _output_options(f):
-    """Attach --out-dir / --run-id / --label / --notes to a command."""
-    f = click.option("--out-dir", type=click.Path(file_okay=False), default=None,
-                     help="Parent directory for the run bundle. The bundle is written "
-                          "to <out-dir>/<run-id>/.")(f)
-    f = click.option("--run-id", default=None,
-                     help="Explicit run id. Defaults to a UTC timestamp.")(f)
-    f = click.option("--label", "labels", multiple=True,
-                     help="Free-form 'key=value' tag stored in meta.json. Repeatable.")(f)
-    f = click.option("--notes", default="", help="Free-form notes stored in meta.json.")(f)
-    return f
-
-
-def _parse_labels(items: tuple[str, ...]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for it in items:
-        if "=" not in it:
-            raise click.BadParameter(f"--label must be 'key=value', got {it!r}")
-        k, v = it.split("=", 1)
-        out[k.strip()] = v.strip()
-    return out
-
-
-def _write_bundle_if_requested(runner: BenchRunner, source_config: dict,
-                               out_dir: str | None, run_id: str | None,
-                               labels: tuple[str, ...], notes: str) -> None:
-    if not out_dir:
-        return
-    path = runner.write_bundle(
-        out_dir,
-        run_id=run_id,
-        source_config=source_config,
-        labels=_parse_labels(labels),
-        notes=notes,
-    )
-    sys.stderr.write(f"[bench-maker] wrote bundle to {path}\n")
+from benchmaker.recipes import all_recipes
+from benchmaker.recipes._cli_shared import (
+    output_options as _output_options,
+    parse_headers as _parse_headers,
+    write_bundle_if_requested as _write_bundle_if_requested,
+)
+from benchmaker.recipes._factory import make_command
 
 
 # ---------------------------------------------------------------- main
@@ -65,11 +30,18 @@ def _write_bundle_if_requested(runner: BenchRunner, source_config: dict,
               help="Logging level (default: INFO).")
 def main(log_level: str) -> None:
     """[benchmaker]: async HTTP benchmarking with pluggable workloads."""
+    level = log_level.upper()
     logging.basicConfig(
-        level=log_level.upper(),
+        level=level,
         format="%(asctime)s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Chatty third-party loggers (one INFO line per HTTP request / hub fetch)
+    # drown out our own output. Pin them to WARNING unless DEBUG was requested.
+    if level != "DEBUG":
+        for noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub",
+                      "filelock", "fsspec", "datasets", "aiohttp"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 @main.command()
@@ -139,7 +111,10 @@ def quick(url: str, method: str, header: tuple[str, ...], json_body: str | None,
           timeout_s: float, connection_limit: int,
           out_dir: str | None, run_id: str | None,
           labels: tuple[str, ...], notes: str, quiet: bool) -> None:
-    """One-liner benchmark of a single endpoint (no config file)."""
+    """[deprecated] One-liner HTTP benchmark — use `benchmaker http` instead."""
+    sys.stderr.write(
+        "[benchmaker] 'quick' is deprecated; use 'benchmaker http'.\n"
+    )
     cfg: dict = {
         "workload_type": {
             "type": "http",
@@ -167,148 +142,6 @@ def quick(url: str, method: str, header: tuple[str, ...], json_body: str | None,
     asyncio.run(runner.run())
     runner.metrics.render(sys.stdout)
     _write_bundle_if_requested(runner, cfg, out_dir, run_id, labels, notes)
-
-
-@main.command()
-@click.option("--url", default=None,
-              help="Endpoint URL (e.g. http://host:8000/v1/chat/completions). "
-                   "Falls back to $OPENAI_API_BASE_URL/$OPENAI_BASE_URL.")
-@click.option("--model", default=None,
-              help="Model name. Falls back to $OPENAI_COMPATIBLE_MODEL/$OPENAI_MODEL.")
-@click.option("--api-key", default=None,
-              help="API key. Falls back to $OPENAI_API_KEY.")
-@click.option("--header", "-H", multiple=True, help="Extra header 'Name: value'.")
-@click.option("--prompt", "prompts", multiple=True,
-              help="Prompt text (repeatable). Mutually exclusive with --prompts-jsonl.")
-@click.option("--prompts-jsonl", type=click.Path(exists=True, dir_okay=False), default=None,
-              help="JSONL file of prompts.")
-@click.option("--prompt-field", default="prompt",
-              help="Field to extract from each JSONL row (default: 'prompt').")
-@click.option("--shuffle/--no-shuffle", default=True, help="Shuffle prompts (static only).")
-@click.option("--seed", type=int, default=0)
-@click.option("--max-tokens", type=int, default=128)
-@click.option("--min-tokens", type=int, default=None,
-              help="vLLM/SGLang extension: minimum tokens before EOS is honored.")
-@click.option("--ignore-eos/--no-ignore-eos", default=None,
-              help="vLLM/SGLang extension: keep generating past EOS until max_tokens.")
-@click.option("--temperature", type=float, default=0.0)
-@click.option("--top-p", type=float, default=None)
-@click.option("--top-k", type=int, default=None)
-@click.option("--stop", multiple=True, help="Stop string (repeatable).")
-@click.option("--extra", "extras", multiple=True,
-              help="Extra sampling param 'key=value' (value parsed as JSON, else string). "
-                   "Repeatable.")
-@click.option("--rate", default="10",
-              help="Load spec, e.g. '100', 'poisson:100', 'closed:32', 'ramp:10..500:30s'.")
-@click.option("--duration", default="10s")
-@click.option("--max-requests", type=int, default=None)
-@click.option("--timeout", "timeout_s", default=600.0, type=float)
-@click.option("--connection-limit", default=1000, type=int)
-@click.option("--dotenv", type=click.Path(), default=".env",
-              help="Path to .env file (default: .env). Use --dotenv '' to disable.")
-@_output_options
-@click.option("--quiet", is_flag=True)
-def llm(url: str | None, model: str | None, api_key: str | None,
-        header: tuple[str, ...],
-        prompts: tuple[str, ...], prompts_jsonl: str | None, prompt_field: str,
-        shuffle: bool, seed: int,
-        max_tokens: int, min_tokens: int | None, ignore_eos: bool | None,
-        temperature: float, top_p: float | None, top_k: int | None,
-        stop: tuple[str, ...], extras: tuple[str, ...],
-        rate: str, duration: str, max_requests: int | None,
-        timeout_s: float, connection_limit: int,
-        dotenv: str,
-        out_dir: str | None, run_id: str | None,
-        labels: tuple[str, ...], notes: str,
-        quiet: bool) -> None:
-    """Benchmark an OpenAI-compatible chat-completions endpoint."""
-    if prompts and prompts_jsonl:
-        raise click.UsageError("--prompt and --prompts-jsonl are mutually exclusive.")
-    if not prompts and not prompts_jsonl:
-        raise click.UsageError("Provide at least one --prompt or --prompts-jsonl.")
-
-    from benchmaker.config import build_workload
-    from benchmaker.core.load import parse_duration, parse_rate_spec
-    from benchmaker.core.runner import BenchConfig
-    from benchmaker.workloads.llm import OpenAIChatWorkloadType
-
-    wt_kwargs: dict[str, Any] = {
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "timeout_s": timeout_s,
-        "headers": _parse_headers(header),
-    }
-    if min_tokens is not None:
-        wt_kwargs["min_tokens"] = min_tokens
-    if ignore_eos is not None:
-        wt_kwargs["ignore_eos"] = ignore_eos
-    if top_p is not None:
-        wt_kwargs["top_p"] = top_p
-    if top_k is not None:
-        wt_kwargs["top_k"] = top_k
-    if stop:
-        wt_kwargs["stop"] = list(stop)
-    for item in extras:
-        if "=" not in item:
-            raise click.BadParameter(f"--extra must be 'key=value', got {item!r}")
-        k, v = item.split("=", 1)
-        try:
-            parsed: Any = json.loads(v)
-        except json.JSONDecodeError:
-            parsed = v
-        wt_kwargs[k.strip()] = parsed
-
-    wt = OpenAIChatWorkloadType.from_env(
-        url=url, model=model, api_key=api_key,
-        dotenv_path=(dotenv or None),
-        **wt_kwargs,
-    )
-
-    if prompts:
-        workload_spec: Any = {
-            "type": "static",
-            "items": list(prompts),
-            "shuffle": shuffle,
-            "seed": seed,
-        }
-    else:
-        workload_spec = {
-            "type": "jsonl",
-            "path": prompts_jsonl,
-            "field": prompt_field,
-        }
-    workload = build_workload(workload_spec)
-
-    dur = parse_duration(duration)
-    load_model = parse_rate_spec(rate, duration_s=dur, max_requests=max_requests)
-    bench_cfg = BenchConfig(
-        workload_type=wt,
-        workload=workload,
-        load=load_model,
-        timeout_s=timeout_s,
-        connection_limit=connection_limit,
-    )
-
-    if quiet:
-        bench_cfg.progress_every_s = 0.0
-
-    runner = BenchRunner(bench_cfg)
-    asyncio.run(runner.run())
-    runner.metrics.render(sys.stdout)
-
-    source_config = {
-        "workload_type": {
-            "type": "openai-chat", "url": wt._url, "model": wt._model,
-            **{k: v for k, v in wt_kwargs.items() if k != "headers"},
-        },
-        "workload": workload_spec,
-        "load": rate,
-        "duration": duration,
-        "max_requests": max_requests,
-        "timeout_s": timeout_s,
-        "connection_limit": connection_limit,
-    }
-    _write_bundle_if_requested(runner, source_config, out_dir, run_id, labels, notes)
 
 
 # ---------------------------------------------------------------- collect
@@ -368,14 +201,14 @@ def collect(paths: tuple[str, ...], fmt: str, metrics: tuple[str, ...],
         sys.stdout.write("\n")
 
 
-def _parse_headers(items: tuple[str, ...]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for it in items:
-        if ":" not in it:
-            raise click.BadParameter(f"Header must be 'Name: value', got {it!r}")
-        k, v = it.split(":", 1)
-        out[k.strip()] = v.strip()
-    return out
+# ---------------------------------------------------------------- recipes
+#
+# Each registered recipe (http, llm, sandbox, swebench, ...) is exposed as a
+# `benchmaker <recipe> --args` subcommand, built from the recipe's options plus
+# the shared load/output options. See benchmaker/recipes/.
+
+for _recipe in all_recipes():
+    main.add_command(make_command(_recipe))
 
 
 if __name__ == "__main__":

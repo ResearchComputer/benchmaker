@@ -44,10 +44,11 @@ async def main():
 asyncio.run(main())
 ```
 
-Or via the CLI:
+Or via the CLI. Workload-specific benchmarks are exposed as **recipes** —
+`benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`):
 
 ```bash
-benchmaker quick --url https://httpbin.org/get --rate poisson:50 --duration 10s
+benchmaker http --url https://httpbin.org/get --rate poisson:50 --duration 10s
 ```
 
 ## Walkthrough: benchmarking an LLM endpoint with ShareGPT
@@ -190,8 +191,9 @@ benchmaker/          # library code
   core/              #   engine: types, load models, runner, metrics, monitors, trace
   io/                #   run output: per-run bundle + cross-run collection
   workloads/         #   workload-types (http, llm, sandbox, agent, hf, eval)
-  swebench/          #   SWE-bench coding agent + grading (shared, native)
-examples/            # runnable examples (incl. swebench/ configs + slice runner)
+  recipes/           #   CLI recipes (http, llm, sandbox, swebench) + registry
+  swebench/          #   SWE-bench coding agent + grading + harbor adapters
+examples/            # runnable examples (incl. swebench/ coding-agent config)
 tools/               # out-of-tree tooling: sharegpt/, swe_images/, agent_warmup/
 tests/               # pytest smoke tests
 docs/                # reference docs

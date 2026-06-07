@@ -1,6 +1,6 @@
 # Correctness / accuracy evaluation
 
-bench-maker can grade each response against a reference and surface accuracy
+benchmaker can grade each response against a reference and surface accuracy
 alongside latency in the same run. This stays out of the core: it's a
 **workload-type wrapper** + a **post-response hook** + a **scorer function**,
 all swappable.
@@ -319,7 +319,7 @@ land in `samples.jsonl` inside the run bundle — **but only when you pass
 stdout.
 
 ```bash
-bench-maker run my_eval.yaml --out-dir ./runs --label model=my-model
+benchmaker run my_eval.yaml --out-dir ./runs --label model=my-model
 # →  ./runs/<run-id>/summary.json    (aggregate metrics)
 #    ./runs/<run-id>/samples.jsonl   (one JSON object per request)
 #    ./runs/<run-id>/meta.json       (run identifiers + resolved config)

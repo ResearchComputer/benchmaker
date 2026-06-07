@@ -1,4 +1,4 @@
-# GSM8K accuracy benchmark, driven by .env (loaded automatically by `bench-maker run`).
+# GSM8K accuracy benchmark, driven by .env (loaded automatically by `benchmaker run`).
 #
 # Required env vars (set in .env or shell):
 #   OPENAI_COMPATIBLE_MODEL   — e.g. swiss-ai/Apertus-8B-Instruct-2509
@@ -8,7 +8,7 @@
 # Requires:  pip install -e .[hf]
 #
 # Run:
-#   bench-maker run examples/config_gsm8k_eval.yaml \
+#   benchmaker run examples/config_gsm8k_eval.yaml \
 #       --out-dir ./runs --label model=apertus-8b
 #
 # Outputs land in:

@@ -19,50 +19,50 @@ limit).
   callable for tests / custom clients.
 - `benchmaker/swebench/grading.py` — pure helpers: ghcr image-key resolution,
   swebench `TestSpec` construction, and authoritative log grading
-  (unit-testable, no sandbox). **Single source of truth** — the agent-warmup
-  generator (`tools/agent_warmup`) imports the same functions.
-- `benchmaker/swebench/native_eval.py` — `SWEBenchAgent`, a `CodingAgent`
-  subclass that evaluates on SWE-bench Verified natively (no harbor).
-- `benchmaker/swebench/harbor_agent.py` / `harbor_eval.py` — the harbor
-  adapters (optional `harbor` dependency).
+  (unit-testable, no sandbox). Used by the agent-warmup generator
+  (`tools/agent_warmup`).
+- `benchmaker/swebench/harbor_agent.py` / `harbor_eval.py` / `pi_agent.py` —
+  the harbor adapters + agents (require the `harbor` package). `harbor_eval` is
+  the engine behind the `benchmaker swebench` recipe.
 
 ## Files here
 
-- `config.yaml` — bench-maker YAML wiring for the plain `CodingAgent`. Static
+- `config.yaml` — benchmaker YAML wiring for the plain `CodingAgent`. Static
   2-item task list by default; swap for a `type: hf` workload to run a real eval.
-- `config_swebench.yaml` — wires `SWEBenchAgent` through `AgentWorkloadType`
-  against the `SWE-bench/SWE-bench_Verified` HF dataset. `AgentResult.ok` (the
-  summary's pass rate) is the swebench `resolved` verdict.
-- `run_slice.py` — drive `SWEBenchAgent` directly over a JSON manifest of
-  instances (a smoke harness, outside the benchmaker runner).
 
-### SWE-bench Verified (harbor-equivalent, native)
+## Run SWE-bench: the `swebench` recipe (harbor)
 
-`SWEBenchAgent` evaluates on SWE-bench Verified the same way
-[`flash-sandbox/examples/harbor`](../../../flash-sandbox/examples/harbor) does,
-but without harbor or mini-swe-agent as a dependency:
+SWE-bench evaluation runs through **harbor** — harbor owns the per-instance
+Flash Sandbox environment, the agent run, and the verifier; benchmaker is the
+launcher with a pluggable agent registry. The recipe is *self-driving*: it
+prints harbor's accuracy summary + job dir (no benchmaker run-bundle).
 
-- boots the **prebuilt per-instance eval image** (repo already at `base_commit`
-  under `/testbed`, deps installed) from the public ghcr `swe-images` mirror —
-  no GitHub clone, no `pip install` on a bare image;
-- runs the agent loop, then collects the diff straight from `git`;
-- **grades in a fresh pod** using the `swebench` package as the source of truth
-  (FAIL_TO_PASS / PASS_TO_PASS → `RESOLVED_FULL`). The agent never sees the
-  hidden `test_patch`.
-
-Run a small slice end-to-end (raise `workload.max_items` once it passes):
+Model URL/model/key fall back to the `OPENAI_*` env vars; the sandbox to
+`$FLASH_SANDBOX_URL`:
 
 ```bash
-benchmaker run examples/swebench/config_swebench.yaml \
-    --out-dir ./runs --label agent=swebench
+# Default pi agent on a 5-task slice:
+benchmaker swebench --n-tasks 5 --concurrency 4
+
+# Our own CodingAgent loop, evaluated by harbor:
+benchmaker swebench --agent coding-agent --n-tasks 5
+
+benchmaker swebench --list-agents
 ```
 
-Extra env var beyond the model ones below: `FLASH_SANDBOX_URL` (e.g.
-`https://sandbox.swissai.cscs.ch`). The CSCS cluster is a **kubernetes**
-backend with no auth. The ghcr mirror is produced by `tools/swe_images`; point
-`image_org` / `image_registry` at a different registry if you mirror elsewhere.
+`scripts/run_swebench.sh` is a thin wrapper (a 5-task smoke run by default); any
+flags pass straight through to the recipe:
 
-### SWE-bench via harbor (harbor *is* the eval engine)
+```bash
+scripts/run_swebench.sh --n-tasks 50 --concurrency 16
+scripts/run_swebench.sh --agent coding-agent
+```
+
+Note: the CSCS cluster is a **kubernetes** backend with no auth (`--backend-type
+kubernetes`); SWE-bench cold-start needs `--timeout-multiplier 4`–`6`. Harbor
+resolves the per-instance images from its registered dataset (`--dataset`).
+
+### Under the hood: `benchmaker.swebench.harbor_eval`
 
 The other way to run SWE-bench: let [harbor](https://github.com/) own the
 evaluation (per-instance environment, agent execution, and verifier), and use
@@ -85,8 +85,8 @@ from `benchmaker.swebench.harbor_eval`.
 The loop seam is `CodingAgent.run_loop(task, executor, ...)`: the model/observe
 loop is decoupled from *where* commands run via an injected `executor`
 (`async (action, timeout) -> (returncode, output)`). The same loop runs under
-harbor (`harbor_agent`) and under benchmaker's own Flash Sandbox client
-(`config_swebench.yaml`) — only the executor differs.
+harbor (`harbor_agent`) and under benchmaker's own Flash Sandbox executor
+(`config.yaml`) — only the executor differs.
 
 Setup (one-time): install harbor + the flash-sandbox SDK into the venv:
 
@@ -116,19 +116,60 @@ env defaults to a **docker** backend (`--backend-type`); SWE-bench cold-start
 needs `--timeout-multiplier 4`–`6`. To wrap a *different* benchmaker loop, point
 `coding-agent`'s `loop_agent` kwarg at another `module:Class`.
 
-### Which SWE-bench path?
+#### pi (`@earendil-works/pi-coding-agent`)
 
-- `config_swebench.yaml` (native) — runs under **benchmaker's** runner, so you
-  get load models, metrics, and `samples.jsonl`; grading is the `swebench`
-  package. No harbor dependency.
-- `benchmaker.swebench.harbor_eval` (harbor) — runs under **harbor's** runner;
-  reuses harbor's registered datasets, built-in agents, and verifier. Pick this
-  when you want parity with the harbor example or its agent zoo.
+pi is a **Node CLI** that runs shell commands locally in its working directory,
+so it can't take an injected executor like our `CodingAgent`. Two harbor agents
+(`benchmaker/swebench/pi_agent.py`) bridge that gap:
+
+- **`--agent pi`** (`PiContainerAgent`) — installs Node + pi *inside* the
+  per-instance environment (`setup()`), writes a `models.json` pointing pi at
+  the OpenAI-compatible endpoint, and runs `pi --mode json` at `/testbed`. pi's
+  local shell is the container shell; edits land in `/testbed` and harbor grades.
+- **`--agent pi-host`** (`PiHostAgent`) — runs pi on the **host** and routes
+  every shell action into the environment. A localhost HTTP bridge forwards to
+  `environment.exec`, and the `pi_ext/remote_exec.js` extension replaces pi's
+  built-in `bash` tool to POST to it. Model reasoning runs on the host; all file
+  edits land in the environment.
+
+```bash
+# pi installed in-container:
+FLASH_SANDBOX_URL=http://localhost:8080 \
+    python -m benchmaker.swebench.harbor_eval --agent pi \
+        --model "$OPENAI_COMPATIBLE_MODEL" --n-tasks 5
+
+# pi on the host, shell routed into the sandbox:
+python -m benchmaker.swebench.harbor_eval --agent pi-host --n-tasks 5
+```
+
+Model config is a `models.json` custom provider (`api: "openai-completions"`)
+built from `OPENAI_API_BASE_URL` / `OPENAI_API_KEY` — pi's built-in `openai`
+provider can't be pointed at a custom base URL. Useful `--agent-kwarg`s:
+`pi_extra_args` (extra pi CLI flags), `total_wall_s`, `context_window`,
+`max_tokens`, and (container mode) `install_script`.
+
+**Verify against your pi build** (the docs left these unspecified, so they're
+runtime knobs rather than hard-coded): the non-interactive/auto-approve flag for
+`--mode json` (pass via `pi_extra_args`, e.g. `--yolo`); that the extension
+auto-loads from `~/.pi/agent/extensions/`; and that environment pods have
+network egress to npm + the model endpoint (container mode installs Node at
+runtime — bake a Node+pi image layer via `tools/swe_images` if you want to skip
+the per-instance install).
+
+### Which entry point?
+
+- **`benchmaker swebench`** (recipe) → `harbor_eval` — the way to run a real
+  SWE-bench evaluation: harbor's registered datasets, built-in/registry agents,
+  and verifier. Self-driving (harbor's accuracy summary + job dir, no benchmaker
+  run-bundle).
+- **`config.yaml`** (below) — runs the plain `CodingAgent` under **benchmaker's**
+  runner over a tiny static task list, so you get load models, metrics, and
+  `samples.jsonl`. A demo of the agent loop, not a full SWE-bench eval.
 
 ## Run the plain coding agent
 
 ```bash
-bench-maker run examples/swebench/config.yaml \
+benchmaker run examples/swebench/config.yaml \
     --out-dir ./runs --label agent=coding-tiny
 ```
 

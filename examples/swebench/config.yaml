@@ -11,7 +11,7 @@
 #   OPENAI_API_KEY            — bearer token (may be unused for local servers)
 #
 # Run:
-#   bench-maker run examples/swebench/config.yaml \
+#   benchmaker run examples/swebench/config.yaml \
 #       --out-dir ./runs --label agent=coding-tiny
 #
 # Outputs in ./runs/<run-id>/:
@@ -39,7 +39,7 @@ workload_type:
     # subprocess execution under a tmp dir.
     sandbox_url: "${FLASH_SANDBOX_URL}"
     sandbox_spec:
-      type: kubernetes
+      type: docker
       image: alpine:3.20
       command: ["sh", "-c", "sleep 3600"]
       cpu_cores: 0.1

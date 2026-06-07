@@ -18,6 +18,12 @@ dependencies = [
     "pyarrow>=24.0.0",
     "pyyaml>=6.0",
     "swebench>=4.1.0",
+    # SWE-bench evaluation runs through harbor (the `benchmaker swebench` recipe).
+    # harbor has no PyPI release — it's the local research package. A bare
+    # `harbor` requirement would risk pulling an unrelated PyPI project, so we
+    # pin the local checkout directly. Adjust the path for your environment, or
+    # install it editable yourself: `pip install -e <path-to>/research/harbor`.
+    "harbor @ file:///pub/scratch/xiayao/research/harbor",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +37,10 @@ benchmaker = "benchmaker.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["benchmaker*"]
+
+[tool.setuptools.package-data]
+# Ship the pi bash-override extension (Mode 2) inside the wheel.
+"benchmaker.swebench" = ["pi_ext/*.js"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

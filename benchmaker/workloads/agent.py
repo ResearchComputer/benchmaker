@@ -68,7 +68,7 @@ class AgentContext:
     """Per-task state handed to ``Agent.run``.
 
     ``fire`` is the runner's request-firing callable. When non-None, agents
-    can route their own HTTP calls through bench-maker's session + hook
+    can route their own HTTP calls through benchmaker's session + hook
     pipeline instead of using a separate client — handy if you want the
     runner's pre/post hooks (auth headers, request tracing) on every internal
     call. Most agents will simply ignore it.

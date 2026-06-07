@@ -26,7 +26,7 @@ async def main():
     workload_type = SandboxWorkloadType(
         base_url=base_url,
         spec={
-            "type": "kubernetes",
+            "type": "docker",
             "image": "alpine:3.20",
             "command": ["sh", "-c", "sleep 3600"],
             "memory_mb": 256,

@@ -7,7 +7,7 @@ pip install -e .
 pip install -e .[dev]   # for tests
 ```
 
-This installs the `benchmaker` Python package and the `bench-maker` CLI.
+This installs the `benchmaker` Python package and the `benchmaker` CLI.
 
 ## Smallest possible benchmark
 
@@ -76,10 +76,11 @@ TTFT, inter-token latency, and tokens/sec are captured automatically. See
 
 ## CLI quick-start
 
-One-liner:
+One-liner (a *recipe* — `benchmaker <recipe> --args`; recipes: `http`, `llm`,
+`sandbox`, `swebench`):
 
 ```bash
-bench-maker quick \
+benchmaker http \
     --url https://httpbin.org/get \
     --rate ramp:10..200:10s \
     --duration 10s
@@ -88,11 +89,11 @@ bench-maker quick \
 Config-driven:
 
 ```bash
-bench-maker run examples/config_llm.yaml \
+benchmaker run examples/config_llm.yaml \
     --out-dir ./runs --run-id baseline --label variant=v0
 
 # pivot many runs into a table
-bench-maker collect ./runs --label variant
+benchmaker collect ./runs --label variant
 ```
 
 See [CLI & YAML reference](cli-and-yaml.md) for the full surface.

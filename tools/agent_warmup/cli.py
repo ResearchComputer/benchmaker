@@ -396,7 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "there's no point setting it near the context size "
                             "(8192 is plenty for these agent turns).")
     p_gen.add_argument("--sandbox-type", default="docker",
-                       help="Flash Sandbox backend (CSCS service is 'kubernetes')")
+                       help="Flash Sandbox backend (CSCS service is 'docker')")
     p_gen.add_argument("--skip-verification", action="store_true",
                        help="don't run tests; emit unverified trajectories "
                             "(verified=false). Also allows repos the swebench "

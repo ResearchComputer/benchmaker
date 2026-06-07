@@ -8,13 +8,20 @@ wiring, a pluggable **agent registry**, and result summarisation.
 The agent is pluggable — harbor's ``BaseAgent`` is the interface, and any of
 these slot in via ``--agent``:
 
-  * a registry key (``mini-swe-agent``, ``coding-agent``, ``claude-code``);
+  * a registry key (``mini-swe-agent``, ``coding-agent``, ``claude-code``,
+    ``pi`` / ``pi-container`` / ``pi-host``);
   * a bare harbor built-in name (``openhands``, ``swe-agent``, ``oracle``, …);
   * a custom ``module.path:ClassName`` (a harbor ``BaseAgent`` subclass).
 
 ``coding-agent`` wraps benchmaker's own loop (``harbor_agent.py``); the loop is
 backend-agnostic (``CodingAgent.run_loop``), so the same code runs under harbor
-here and under benchmaker's Flash Sandbox client in ``config_swebench.yaml``.
+here and under benchmaker's own Flash Sandbox executor (``examples/swebench/
+config.yaml``).
+
+``pi`` / ``pi-host`` run **pi** (``@earendil-works/pi-coding-agent``) — see
+``benchmaker.swebench.pi_agent``: ``pi`` installs pi inside the environment and
+runs it at ``/testbed``; ``pi-host`` runs pi on the host and routes its shell
+into the environment via a localhost bridge.
 
 Usage::
 
@@ -67,6 +74,10 @@ AGENT_REGISTRY: dict[str, dict[str, str]] = {
         "import_path": "benchmaker.swebench.harbor_agent:BenchmakerHostAgent",
     },
     "claude-code": {"name": "claude-code"},
+    # pi (pi-coding-agent), two execution modes — see benchmaker.swebench.pi_agent.
+    "pi": {"import_path": "benchmaker.swebench.pi_agent:PiContainerAgent"},
+    "pi-container": {"import_path": "benchmaker.swebench.pi_agent:PiContainerAgent"},
+    "pi-host": {"import_path": "benchmaker.swebench.pi_agent:PiHostAgent"},
 }
 
 

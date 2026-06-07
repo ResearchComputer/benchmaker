@@ -18,7 +18,7 @@ runner.write_bundle("./runs", run_id="baseline", labels={"variant": "v0"})
 or from the CLI:
 
 ```bash
-bench-maker run cfg.yaml --out-dir ./runs --run-id baseline --label variant=v0
+benchmaker run cfg.yaml --out-dir ./runs --run-id baseline --label variant=v0
 ```
 
 ## Run bundle layout
@@ -156,9 +156,9 @@ A post-hook can also flip `sample.ok` to `False` after the fact.
 ## Collecting many runs into a table
 
 ```bash
-bench-maker collect ./runs                     # markdown table to stdout
-bench-maker collect ./runs --format csv > results.csv
-bench-maker collect ./runs/a ./runs/b ./runs/c # explicit run-dirs also work
+benchmaker collect ./runs                     # markdown table to stdout
+benchmaker collect ./runs --format csv > results.csv
+benchmaker collect ./runs/a ./runs/b ./runs/c # explicit run-dirs also work
 ```
 
 Default columns: `run_id, workload_type, workload, wall_s, total, ok, fail,
@@ -168,16 +168,16 @@ Add columns:
 
 ```bash
 # Promote a label to a column.
-bench-maker collect ./runs --label variant
+benchmaker collect ./runs --label variant
 
 # Add a workload-specific or monitor metric (dotted path inside summary.json).
-bench-maker collect ./runs \
+benchmaker collect ./runs \
     --metric workload_metrics.ttft_s.p50 \
     --metric workload_metrics.tokens_per_s.mean \
     --metric monitors.vllm.metrics.vllm:num_requests_running.mean
 
 # Restrict the column set (after extras are added) and sort.
-bench-maker collect ./runs \
+benchmaker collect ./runs \
     --label variant \
     --columns run_id,label.variant,rps,p99_s \
     --sort-by rps

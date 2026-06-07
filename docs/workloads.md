@@ -23,7 +23,7 @@ headers); items from the workload fill in the per-request payload.
 HttpWorkloadType(
     url="https://api.example.com/v1/predict",
     method="POST",
-    headers={"User-Agent": "bench-maker/0.3"},
+    headers={"User-Agent": "benchmaker/0.3"},
     timeout_s=30,
 )
 ```
@@ -84,7 +84,7 @@ OpenAIChatWorkloadType(
 
 `extra_body=` is still accepted as an explicit dict; on key conflict,
 `**sampling` wins. The same pass-through works in YAML (`min_tokens: 64` under
-`workload_type:`) and on the `bench-maker llm` CLI (`--min-tokens 64`,
+`workload_type:`) and on the `benchmaker llm` CLI (`--min-tokens 64`,
 `--extra repetition_penalty=1.1`).
 
 **Item interpretation:**

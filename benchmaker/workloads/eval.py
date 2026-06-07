@@ -1,6 +1,6 @@
 """Correctness / accuracy evaluation as a composable plugin.
 
-Layered design (matches the rest of bench-maker):
+Layered design (matches the rest of benchmaker):
 
   * `EvalWorkloadType` wraps any base WorkloadType. It strips an
     eval-only reference field (default `"reference"`) out of each dict item

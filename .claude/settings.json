@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk grep *)",
+      "Bash(rtk ls *)",
+      "Bash(python -c ' *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(.venv/bin/python -m pytest tests/test_eval.py -q)",
+      "Bash(.venv/bin/python -c \"import harbor, os; print\\(os.path.dirname\\(harbor.__file__\\)\\)\")",
+      "Read(//pub/scratch/xiayao/research/harbor/src/harbor/environments/**)",
+      "Bash(cd /pub/scratch/xiayao/research/harbor; rtk grep -rln \"_mirror_ref\\\\|SWE_IMAGE_REGISTRY\\\\|SWE_IMAGE_MIRROR\\\\|_SWE_IMAGE_MARKER\\\\|sweb.eval\" --include=*.py . | grep -v __pycache__)",
+      "Read(//pub/scratch/xiayao/research/harbor/**)",
+      "Bash(rtk read *)",
+      "Bash(python3 -)",
+      "Bash(python -m py_compile src/harbor/environments/flash_sandbox.py)",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(cd /pub/scratch/xiayao/research/utils/benchmaker *)",
+      "Read(//pub/scratch/xiayao/cache/**)"
+    ],
+    "additionalDirectories": [
+      "/pub/scratch/xiayao/research/harbor/src/harbor/environments"
+    ]
+  }
+}

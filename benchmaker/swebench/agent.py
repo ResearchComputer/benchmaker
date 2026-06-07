@@ -1,4 +1,4 @@
-"""Small SWE-style coding agent for bench-maker.
+"""Small SWE-style coding agent for benchmaker.
 
 A faithful but compact port of mini-swe-agent's control flow
 (https://github.com/SWE-agent/mini-swe-agent). The loop is:
@@ -97,6 +97,7 @@ SendFn = Callable[[list[dict]], Awaitable[str]]
 
 
 _DEFAULT_SANDBOX_SPEC: dict[str, Any] = {
+    "type": "docker",
     "image": "alpine:3.20",
     "command": ["sh", "-c", "sleep 3600"],
     "cpu_cores": 0.1,
@@ -273,7 +274,6 @@ class CodingAgent(Agent):
         sess = await self._ensure_session()
         url = f"{self._sandbox_url}{self._sandbox_prefix}"
         timeout = aiohttp.ClientTimeout(total=self._sandbox_create_timeout_s)
-        print(f"Creating sandbox with spec {body} at {url}", flush=True)
         async with sess.post(url, headers=self._sandbox_headers,
                              json=body, timeout=timeout) as resp:
             text = await resp.text()

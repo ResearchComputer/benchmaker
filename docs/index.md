@@ -41,10 +41,12 @@ A benchmark in benchmaker is the composition of four things:
 8. [Correctness / accuracy eval](eval.md) — grade responses against references
    alongside latency: `EvalWorkloadType`, `correctness_hook`, stock scorers,
    LLM-as-judge.
-9. [CLI & YAML reference](cli-and-yaml.md) — `bench-maker quick`,
-   `bench-maker run`, full YAML schema.
+9. [CLI & YAML reference](cli-and-yaml.md) — recipes (`benchmaker http`/`llm`/
+   `sandbox`/`swebench`), `benchmaker run`, full YAML schema.
 10. [ShareGPT benchmark](sharegpt-benchmark.md) — self-contained end-to-end
     walkthrough: real prompt dataset → OpenAI-compatible endpoint → metrics.
+11. [pi on SWE-bench](pi-swebench.md) — run the pi coding agent on SWE-bench via
+    harbor; in-container vs host + remote-bash modes, and the one-command runner.
 
 ## Where things live
 

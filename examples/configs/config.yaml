@@ -1,10 +1,10 @@
-# Generic HTTP: bench-maker run examples/config.yaml
+# Generic HTTP: benchmaker run examples/config.yaml
 workload_type:
   type: http
   url: https://httpbin.org/get
   method: GET
   headers:
-    User-Agent: bench-maker/0.2
+    User-Agent: benchmaker/0.2
   timeout_s: 30
 
 # Optional dataset of per-request items. Omit for fixed-request benchmarks.

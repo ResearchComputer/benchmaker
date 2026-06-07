@@ -7,7 +7,7 @@
 # Requires:  pip install -e .[hf]
 #
 # Run:
-#   bench-maker run examples/configs/config_agent_trove.yaml \
+#   benchmaker run examples/configs/config_agent_trove.yaml \
 #       --out-dir ./runs --label agent=my-agent
 #
 # Outputs:

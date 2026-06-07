@@ -1,26 +1,44 @@
 # CLI & YAML reference
 
-The `bench-maker` CLI is installed by `pip install -e .`. It has four
-subcommands: `quick` (one-liner HTTP), `llm` (one-liner OpenAI-compatible
-chat), `run` (config file), and `collect` (pivot many run-dirs into a table).
+The `benchmaker` CLI is installed by `pip install -e .`. Its subcommands fall
+into two groups:
 
-All three benchmark subcommands accept the same set of output flags:
+- **Recipes** — named, self-contained benchmark scenarios you run as
+  `benchmaker <recipe> --args`: `http` (one-off HTTP), `llm` (OpenAI-compatible
+  chat), `sandbox` (Flash Sandbox), and `swebench` (SWE-bench Verified eval).
+- **Infra commands** — `run` (drive any benchmark from a YAML config file) and
+  `collect` (pivot many run-dirs into a table).
 
-| Flag             | Meaning                                                              |
-| ---------------- | -------------------------------------------------------------------- |
-| `--out-dir DIR`  | Parent dir for the run bundle. The bundle is written to `DIR/<run-id>/`. |
-| `--run-id ID`    | Override the default UTC-timestamp run id.                           |
-| `--label k=v`    | Free-form tag stored in `meta.json` (repeatable; surfaceable in `collect`). |
-| `--notes TEXT`   | Free-form note stored in `meta.json`.                                |
+> `quick` is a deprecated alias for `http`; it still works but prints a warning.
 
-See [Metrics & output](metrics.md) for the on-disk format.
+Every recipe shares the same **load**, **timeout**, and **output** flags (added
+by the CLI on top of each recipe's own options):
 
-## `bench-maker quick`
+| Flag                  | Meaning                                                       |
+| --------------------- | ------------------------------------------------------------ |
+| `--rate`              | Load spec (see [Load models](load-models.md)). Default `10`. |
+| `--duration`         | `30s`, `2m`, `1h`, or a bare number (seconds). Default `10s`. |
+| `--max-requests`      | Stop after N requests                                        |
+| `--timeout`           | Per-request timeout in seconds (default `600`)              |
+| `--connection-limit`  | Connector cap (default `1000`)                              |
+| `--dotenv`            | Path to `.env` (default `.env`; use `--dotenv ''` to disable) |
+| `--out-dir DIR`       | Parent dir for the run bundle (`DIR/<run-id>/`)             |
+| `--run-id ID`         | Override the default UTC-timestamp run id                   |
+| `--label k=v`         | Free-form tag stored in `meta.json` (repeatable)           |
+| `--notes TEXT`        | Free-form note stored in `meta.json`                       |
+| `--quiet`             | Suppress progress output                                    |
 
-Run a single endpoint without writing a config file.
+Some recipes override the load/timeout *defaults* (e.g. `swebench` defaults to
+`--rate closed:16 --timeout 7200`); you can still pass the flags to override.
+Recipes don't expose hooks or monitors — use `run` with a config file for that.
+See [Metrics & output](metrics.md) for the on-disk bundle format.
+
+## `benchmaker http`
+
+Benchmark a single HTTP endpoint without writing a config file.
 
 ```bash
-bench-maker quick \
+benchmaker http \
     --url https://httpbin.org/post \
     --method POST \
     -H "Content-Type: application/json" \
@@ -31,7 +49,7 @@ bench-maker quick \
     --out-dir ./runs --run-id baseline
 ```
 
-Options:
+Recipe options (plus the shared flags above):
 
 | Flag                  | Meaning                                                |
 | --------------------- | ------------------------------------------------------ |
@@ -40,24 +58,15 @@ Options:
 | `-H, --header`        | `'Name: value'` — repeatable                           |
 | `--json-body`         | JSON body string (mutually exclusive with `--data`)    |
 | `--data`              | Raw string body                                        |
-| `--rate`              | Rate spec (see [Load models](load-models.md))          |
-| `--duration`          | `30s`, `2m`, `1h`, or a bare number (seconds)          |
-| `--max-requests`      | Stop after N requests                                  |
-| `--timeout`           | Per-request timeout (seconds)                          |
-| `--connection-limit`  | Connector cap (default 1000)                           |
-| `--out-dir`, `--run-id`, `--label`, `--notes` | Run-bundle output (see top of this page) |
-| `--quiet`             | Suppress progress output                               |
 
-`quick` doesn't expose hooks or monitors — use `run` with a config file for that.
-
-## `bench-maker llm`
+## `benchmaker llm`
 
 Drive an OpenAI-compatible chat-completions endpoint (vLLM, SGLang, TGI,
 OpenAI itself, ...) without a config file. URL / model / API key fall back to
 `.env` (`OPENAI_API_BASE_URL`, `OPENAI_COMPATIBLE_MODEL`, `OPENAI_API_KEY`).
 
 ```bash
-bench-maker llm \
+benchmaker llm \
     --url http://localhost:8000/v1/chat/completions \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --prompt "Explain RDMA in one paragraph." \
@@ -70,7 +79,7 @@ bench-maker llm \
     --out-dir ./runs --label model=llama-3.1-8b
 ```
 
-Options:
+Recipe options (plus the shared flags above):
 
 | Flag                         | Meaning                                                                |
 | ---------------------------- | ---------------------------------------------------------------------- |
@@ -91,23 +100,93 @@ Options:
 | `--top-k`                    | Top-k sampling (vLLM/SGLang)                                           |
 | `--stop`                     | Stop string — repeatable                                               |
 | `--extra`                    | Pass-through `'key=value'` (value JSON-decoded if possible) — repeatable |
-| `--rate`                     | Rate spec (see [Load models](load-models.md))                          |
-| `--duration`                 | `30s`, `2m`, `1h`, or a bare number                                    |
-| `--max-requests`             | Stop after N requests                                                  |
-| `--timeout`                  | Per-request timeout (default 600s)                                     |
-| `--connection-limit`         | Connector cap (default 1000)                                           |
-| `--dotenv`                   | Path to `.env` (default `.env`; use `--dotenv ''` to disable)          |
-| `--out-dir`, `--run-id`, `--label`, `--notes` | Run-bundle output (see top of this page)              |
-| `--quiet`                    | Suppress progress output                                               |
 
 `--extra` is the escape hatch for any sampling param the dedicated flags don't
 cover (e.g. `--extra guided_json='{"type":"object"}'`, `--extra frequency_penalty=0.5`).
 It maps 1:1 onto the request body.
 
-## `bench-maker run`
+## `benchmaker sandbox`
+
+Benchmark a [Flash Sandbox](workloads.md) endpoint. `--operation exec` (default)
+reuses one sandbox per run; `create` makes a fresh pod per request; `lifecycle`
+times the full create → exec → delete sequence per request.
 
 ```bash
-bench-maker run config.yaml \
+benchmaker sandbox \
+    --base-url http://localhost:8080 \
+    --operation lifecycle \
+    --image alpine:3.20 \
+    --command "echo hello" \
+    --command "uname -a" \
+    --ttl-seconds 600 \
+    --rate closed:8 --duration 30s
+```
+
+Recipe options (plus the shared flags above):
+
+| Flag                          | Meaning                                                          |
+| ----------------------------- | --------------------------------------------------------------- |
+| `--base-url`                  | Flash Sandbox base URL (required)                               |
+| `--operation`                 | `exec` (default), `create`, or `lifecycle`                      |
+| `-c, --command`               | Command to run — repeatable (one workload item each)            |
+| `--image`                     | Image for the create spec (e.g. `alpine:3.20`)                  |
+| `--spec-json`                 | JSON object merged into the create spec (overrides `--image`)   |
+| `--endpoint-prefix`           | `/sandboxes` (cluster, default) or `/native/sandboxes` (node)   |
+| `--ttl-seconds`               | Server-side reap TTL for created sandboxes                      |
+| `--persistent / --no-persistent` | Use `/pshell` so `cd`/`export` persist across exec calls     |
+| `--sandbox-id`                | Target an existing sandbox (exec only)                          |
+| `-H, --header`                | Extra header `'Name: value'` — repeatable                       |
+
+## `benchmaker swebench`
+
+Evaluate a coding agent on SWE-bench through **harbor**. Unlike the other
+recipes, this one is *self-driving*: harbor owns the per-instance Flash Sandbox
+environment, the agent run, and the verifier, so it does **not** flow through
+`BenchRunner` and produces **no run-bundle** — it prints harbor's accuracy
+summary + job dir instead (so the shared load/timeout/`--out-dir`/`collect`
+flags don't apply; only `--dotenv` is shared). Requires the `harbor` package.
+
+Model URL/model/key fall back to `.env` (`OPENAI_API_BASE_URL`,
+`OPENAI_COMPATIBLE_MODEL`, `OPENAI_API_KEY`); the sandbox comes from
+`$FLASH_SANDBOX_URL`. Harbor resolves the per-instance images from its
+registered dataset (`--dataset`), so there are no image-registry flags here.
+
+```bash
+# A small slice with the default pi agent:
+benchmaker swebench --n-tasks 5 --concurrency 4
+
+# Our own CodingAgent loop, evaluated by harbor:
+benchmaker swebench --agent coding-agent --n-tasks 5
+
+# List the agent registry and exit:
+benchmaker swebench --list-agents
+```
+
+Recipe options (plus the shared `--dotenv`):
+
+| Flag                          | Meaning                                                          |
+| ----------------------------- | --------------------------------------------------------------- |
+| `--agent`                     | Registry key (`pi` default, `pi-host`, `coding-agent`, `mini-swe-agent`, `claude-code`), a bare harbor built-in, or `module:Class` |
+| `--dataset`                   | Harbor dataset slug (default `swebench-verified`)              |
+| `--model` / `--api-base` / `--api-key` | Model endpoint (fall back to the `OPENAI_*` env vars)  |
+| `--n-tasks`                   | Cap the number of dataset tasks                                |
+| `--task`                      | Restrict to specific task name(s)/glob(s) — repeatable        |
+| `--concurrency`               | Concurrent trials, harbor `n_concurrent_trials` (default `4`)  |
+| `--n-attempts`                | Attempts per task (default `1`)                                |
+| `--timeout-multiplier`        | Multiplier on harbor timeouts; cold-start needs 4–6× (default `4.0`) |
+| `--force-build`               | Force-rebuild the environment image                            |
+| `--backend-type`              | Flash Sandbox backend (`docker` default, `kubernetes`)         |
+| `--request-timeout-sec`       | Per-request timeout (default `120`)                            |
+| `--agent-ready-timeout-sec`   | Wait for the in-sandbox agent to come up (default `600`)       |
+| `--agent-kwarg`               | Extra agent kwarg `key=value` — repeatable                     |
+| `--agent-config-file`         | YAML forwarded to the agent's `config_file` kwarg             |
+| `--job-name`                  | Harbor job name (defaults to a timestamp)                      |
+| `--list-agents`               | List the registry agent keys and exit                         |
+
+## `benchmaker run`
+
+```bash
+benchmaker run config.yaml \
     --out-dir ./runs --run-id baseline --label variant=v0
 ```
 
@@ -119,14 +198,14 @@ Options:
 | `--dotenv`                                    | Path to `.env` (default `.env`)                  |
 | `--quiet`                                     | Suppress progress output                         |
 
-## `bench-maker collect`
+## `benchmaker collect`
 
 Pivot one or more run bundles into a comparison table on stdout:
 
 ```bash
-bench-maker collect ./runs                              # markdown
-bench-maker collect ./runs --format csv > results.csv
-bench-maker collect ./runs --label variant \
+benchmaker collect ./runs                              # markdown
+benchmaker collect ./runs --format csv > results.csv
+benchmaker collect ./runs --label variant \
     --metric workload_metrics.ttft_s.p50 \
     --metric workload_metrics.tokens_per_s.mean \
     --sort-by p99_s
@@ -313,6 +392,6 @@ monitors:
 Then:
 
 ```bash
-bench-maker run llm_bench.yaml \
+benchmaker run llm_bench.yaml \
     --out-dir ./runs --run-id llama-baseline --label model=llama-3.1-8b
 ```
