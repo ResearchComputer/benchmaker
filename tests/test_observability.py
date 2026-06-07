@@ -59,3 +59,27 @@ def test_phase_spans_from_result_basic():
 def test_phase_spans_skips_unfinished():
     r = _fake_result(phases={"agent_setup": _ti(None, None)})
     assert obs.phase_spans_from_result(r) == []
+
+
+def test_util_row_from_status():
+    node = types.SimpleNamespace(node_id="n1", available=True, running_count=3)
+    status = types.SimpleNamespace(
+        node_count=2, available_node_count=1, unavailable_node_count=1,
+        sandbox_count=8, nodes=(node,),
+    )
+    wall = datetime(2026, 6, 7, 12, 2, 12, tzinfo=timezone.utc)
+    row = obs.util_row_from_status(status, t=132.5, wall=wall)
+    assert row["t"] == 132.5
+    assert row["wall"].startswith("2026-06-07T12:02:12")
+    assert row["node_count"] == 2 and row["available_node_count"] == 1
+    assert row["sandbox_count"] == 8
+    assert row["nodes"] == [{"id": "n1", "available": True, "running_count": 3}]
+
+
+def test_util_row_handles_empty_nodes():
+    status = types.SimpleNamespace(
+        node_count=0, available_node_count=0, unavailable_node_count=0,
+        sandbox_count=0, nodes=(),
+    )
+    row = obs.util_row_from_status(status, t=0.0, wall=datetime.now(timezone.utc))
+    assert row["nodes"] == [] and row["sandbox_count"] == 0

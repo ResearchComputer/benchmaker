@@ -65,3 +65,26 @@ def phase_spans_from_result(result: Any) -> list[dict]:
             start=_iso(start), end=_iso(end), duration_s=_dur(start, end),
         ))
     return spans
+
+
+def util_row_from_status(status: Any, t: float, wall: datetime) -> dict:
+    """One ``utilization.jsonl`` row from a flash-sandbox ``ClusterStatus``.
+
+    ``t`` is seconds since the poller started; ``wall`` is the UTC timestamp.
+    """
+    nodes = []
+    for n in getattr(status, "nodes", ()) or ():
+        nodes.append({
+            "id": getattr(n, "node_id", "") or "",
+            "available": bool(getattr(n, "available", False)),
+            "running_count": int(getattr(n, "running_count", 0) or 0),
+        })
+    return {
+        "t": round(float(t), 3),
+        "wall": wall.isoformat(),
+        "node_count": int(getattr(status, "node_count", 0) or 0),
+        "available_node_count": int(getattr(status, "available_node_count", 0) or 0),
+        "unavailable_node_count": int(getattr(status, "unavailable_node_count", 0) or 0),
+        "sandbox_count": int(getattr(status, "sandbox_count", 0) or 0),
+        "nodes": nodes,
+    }
