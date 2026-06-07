@@ -183,3 +183,68 @@ def format_summary(summary: dict) -> str:
             f"(mean avail {_fmt(u['available_mean'])}); {u['polls']} polls"
         )
     return "\n".join(lines)
+
+
+def _nested(d: dict, *path: str) -> Any:
+    cur: Any = d
+    for k in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _ts_to_iso(ts: Any) -> Optional[str]:
+    if isinstance(ts, str):
+        return ts
+    if isinstance(ts, (int, float)):
+        # Heuristic: values past ~year 5138 in seconds are really epoch millis.
+        secs = ts / 1000.0 if ts > 1e11 else float(ts)
+        try:
+            return datetime.fromtimestamp(secs, tz=timezone.utc).isoformat()
+        except (ValueError, OSError, OverflowError):
+            return None
+    return None
+
+
+def parse_pi_token_spans(text: str, *, trial: str = "", task: str = "") -> list[dict]:
+    """Per-request token ``llm_call`` spans from a pi ``--mode json`` JSONL log.
+
+    Defensive: each line is one JSON event; any object whose ``usage`` carries a
+    numeric ``input`` or ``output`` becomes one span. pi's usage is shaped
+    ``{input, output, cacheRead, cacheWrite, cost:{total}}`` with a sibling
+    ``timestamp``. Unknown/renamed fields degrade to ``None`` and never raise.
+    """
+    spans: list[dict] = []
+    seq = 0
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        usage = obj.get("usage") if isinstance(obj, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        i, o = usage.get("input"), usage.get("output")
+        if not isinstance(i, (int, float)) and not isinstance(o, (int, float)):
+            continue
+        cache = 0
+        for k in ("cacheRead", "cacheWrite"):
+            v = usage.get(k)
+            if isinstance(v, (int, float)):
+                cache += int(v)
+        cost = _nested(usage, "cost", "total")
+        ts_iso = _ts_to_iso(obj.get("timestamp"))
+        seq += 1
+        spans.append(_span(
+            trial, task, "llm_call", "pi_llm_call",
+            start=ts_iso, end=ts_iso, seq=seq,
+            n_input_tokens=int(i) if isinstance(i, (int, float)) else None,
+            n_output_tokens=int(o) if isinstance(o, (int, float)) else None,
+            n_cache_tokens=cache or None,
+            cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+        ))
+    return spans

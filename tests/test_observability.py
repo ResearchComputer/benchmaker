@@ -127,3 +127,37 @@ def test_format_summary_mentions_sections():
     )
     text = obs.format_summary(s)
     assert "verifier" in text and "sandbox" in text.lower()
+
+
+def test_parse_pi_token_spans_nominal():
+    lines = [
+        json.dumps({"type": "session_header", "id": "abc"}),       # header, no usage
+        json.dumps({"type": "message", "role": "assistant",
+                    "timestamp": "2026-06-07T12:00:01+00:00",
+                    "usage": {"input": 1200, "output": 150,
+                              "cacheRead": 100, "cacheWrite": 0,
+                              "cost": {"total": 0.0031}}}),
+        "not json at all",                                         # skipped
+        json.dumps({"type": "tool_result"}),                       # no usage -> skipped
+    ]
+    spans = obs.parse_pi_token_spans("\n".join(lines), trial="t9", task="k9")
+    assert len(spans) == 1
+    sp = spans[0]
+    assert sp["kind"] == "llm_call" and sp["trial"] == "t9" and sp["task"] == "k9"
+    assert sp["n_input_tokens"] == 1200 and sp["n_output_tokens"] == 150
+    assert sp["n_cache_tokens"] == 100 and abs(sp["cost_usd"] - 0.0031) < 1e-9
+    assert sp["start"].startswith("2026-06-07T12:00:01")
+    assert sp["seq"] == 1
+
+
+def test_parse_pi_token_spans_missing_and_renamed_fields_degrade():
+    lines = [
+        json.dumps({"usage": {"output": 7}}),                      # no input, no ts
+        json.dumps({"usage": {"foo": 1, "bar": 2}}),               # renamed -> no tokens, skipped
+        json.dumps({"usage": {"input": 5}, "timestamp": 1750000000000}),  # epoch millis
+    ]
+    spans = obs.parse_pi_token_spans("\n".join(lines))
+    # first (output only) kept, second skipped (no numeric input/output), third kept
+    assert len(spans) == 2
+    assert spans[0]["n_output_tokens"] == 7 and spans[0]["start"] is None
+    assert spans[1]["n_input_tokens"] == 5 and spans[1]["start"] is not None
