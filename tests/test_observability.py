@@ -247,3 +247,58 @@ async def test_run_loop_emits_tracer_spans_in_order():
     assert all(s["start"] and s["end"] and s["duration_s"] is not None for s in seen)
     # send_fn path -> LoopResult tokens stay None
     assert result.n_input_tokens is None and result.exit_status == "submitted"
+
+
+async def test_host_agent_writes_spans_and_tokens(tmp_path):
+    from benchmaker.swebench.harbor_agent import BenchmakerHostAgent
+
+    # Fake environment: exec echoes rc=0.
+    class FakeExecRes:
+        def __init__(self):
+            self.return_code = 0
+            self.stdout = "ok\n"
+            self.stderr = ""
+
+    class FakeEnv:
+        async def exec(self, command, cwd=None, timeout_sec=None):
+            return FakeExecRes()
+
+    class FakeCtx:
+        def __init__(self):
+            self.metadata = None
+            self.n_input_tokens = None
+            self.n_output_tokens = None
+            self.n_cache_tokens = None
+
+    # Build the agent but swap in a loop whose model returns usage and submits.
+    agent = BenchmakerHostAgent(logs_dir=tmp_path, model="m", api_base="http://x",
+                                api_key="k")
+
+    replies = ["```bash\nls\n```",
+               "```bash\nCOMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nok\n```"]
+    usages = [{"n_input_tokens": 100, "n_output_tokens": 10, "n_cache_tokens": 0},
+              {"n_input_tokens": 120, "n_output_tokens": 5, "n_cache_tokens": 0}]
+    state = {"i": 0}
+
+    from benchmaker.swebench.agent import CodingAgent
+
+    class TokenLoop(CodingAgent):
+        async def _send_with_usage(self, messages):
+            i = state["i"]; state["i"] += 1
+            return replies[i], usages[i]
+
+    agent._build_loop_agent = lambda: TokenLoop(url="http://x/chat/completions",
+                                                model="m", api_key="k", step_limit=5)
+
+    ctx = FakeCtx()
+    await agent.run("do it", FakeEnv(), ctx)
+
+    spans_file = tmp_path / "timeline-spans.jsonl"
+    assert spans_file.exists()
+    spans = [json.loads(x) for x in spans_file.read_text().splitlines() if x.strip()]
+    kinds = [s["kind"] for s in spans]
+    assert kinds == ["llm_call", "sandbox_exec", "llm_call"]
+    assert spans[0]["n_input_tokens"] == 100
+    # token totals populated onto the harbor context
+    assert ctx.n_input_tokens == 220 and ctx.n_output_tokens == 15
+    assert ctx.metadata["exit_status"] == "submitted"

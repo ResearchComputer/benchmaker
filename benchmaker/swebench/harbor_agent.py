@@ -41,6 +41,12 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from benchmaker.swebench.agent import CodingAgent, Executor
+from benchmaker.swebench._flash_hardening import harden_flash_sandbox_client
+
+# harbor imports this module via the agent ``import_path`` before starting the
+# flash-sandbox environment; patch the HTTP client here so the `harbor run`
+# path is hardened too. Idempotent; no-op without flash-sandbox.
+harden_flash_sandbox_client()
 
 DEFAULT_LOOP_AGENT = "benchmaker.swebench.agent:CodingAgent"
 
@@ -210,12 +216,22 @@ class BenchmakerHostAgent(BaseAgent):
     ) -> None:
         loop_agent = self._build_loop_agent()
         executor = self._make_executor(environment)
+        spans_path = Path(self.logs_dir) / "timeline-spans.jsonl"
+
+        def _tracer(span: dict) -> None:
+            try:
+                with spans_path.open("a") as fh:
+                    fh.write(json.dumps(span) + "\n")
+            except Exception:
+                pass
+
         try:
             result = await loop_agent.run_loop(
                 instruction,
                 executor,
                 system_prompt=self._system_prompt,
                 instance_template=self._instance_template,
+                tracer=_tracer,
             )
         except Exception as exc:
             self.logger.exception("benchmaker-host agent crashed: %s", exc)
@@ -230,6 +246,14 @@ class BenchmakerHostAgent(BaseAgent):
                 "submission": result.submission,
                 "messages": result.messages,
             }, indent=2))
+        except Exception:
+            pass
+
+        # Surface per-trial token totals to harbor (so result.json / DB get them).
+        try:
+            context.n_input_tokens = result.n_input_tokens
+            context.n_output_tokens = result.n_output_tokens
+            context.n_cache_tokens = result.n_cache_tokens
         except Exception:
             pass
 
