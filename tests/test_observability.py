@@ -205,3 +205,45 @@ def test_write_jsonl_roundtrip(tmp_path):
     obs._write_jsonl(p, [{"a": 1}, {"b": 2}])
     lines = p.read_text().splitlines()
     assert [json.loads(x) for x in lines] == [{"a": 1}, {"b": 2}]
+
+
+import pytest
+from benchmaker.swebench.agent import CodingAgent, parse_openai_usage
+
+
+def test_parse_openai_usage_shapes():
+    data = {"usage": {"prompt_tokens": 1000, "completion_tokens": 120,
+                      "prompt_tokens_details": {"cached_tokens": 80}}}
+    u = parse_openai_usage(data)
+    assert u == {"n_input_tokens": 1000, "n_output_tokens": 120, "n_cache_tokens": 80}
+    assert parse_openai_usage({}) is None
+    assert parse_openai_usage({"usage": {}}) == {
+        "n_input_tokens": None, "n_output_tokens": None, "n_cache_tokens": None}
+
+
+async def test_run_loop_emits_tracer_spans_in_order():
+    # canned model: step 1 runs a command, step 2 submits.
+    replies = ["```bash\necho hi\n```", "```bash\nCOMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndone\n```"]
+    state = {"i": 0}
+
+    async def send(messages):
+        r = replies[state["i"]]
+        state["i"] += 1
+        return r
+
+    async def fake_exec(action, timeout_s):
+        return 0, "hi\n"
+
+    seen: list[dict] = []
+    agent = CodingAgent(send_fn=send, step_limit=5)
+    result = await agent.run_loop("do it", fake_exec, tracer=seen.append)
+
+    kinds = [(s["kind"], s["seq"]) for s in seen]
+    assert kinds == [("llm_call", 1), ("sandbox_exec", 1), ("llm_call", 2)]
+    # send_fn path carries no usage -> token fields present but None
+    assert seen[0]["n_input_tokens"] is None
+    assert seen[1]["rc"] == 0
+    # every span has start/end/duration
+    assert all(s["start"] and s["end"] and s["duration_s"] is not None for s in seen)
+    # send_fn path -> LoopResult tokens stay None
+    assert result.n_input_tokens is None and result.exit_status == "submitted"

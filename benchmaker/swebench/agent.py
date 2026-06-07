@@ -33,6 +33,7 @@ import os
 import asyncio
 import tempfile
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 from benchmaker import Agent, AgentContext, AgentResult
@@ -48,6 +49,35 @@ SUBMIT_TOKEN = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 Executor = Callable[[str, float], Awaitable[tuple[int, str]]]
 
 
+def parse_openai_usage(data: Any) -> Optional[dict]:
+    """Token usage from an OpenAI-compatible chat response, or None if absent.
+
+    Maps ``prompt_tokens`` -> input, ``completion_tokens`` -> output, and
+    ``prompt_tokens_details.cached_tokens`` -> cache. Tolerant of missing fields.
+    """
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    pin = usage.get("prompt_tokens")
+    pout = usage.get("completion_tokens")
+    cached = None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = details.get("cached_tokens")
+    _int = lambda v: int(v) if isinstance(v, (int, float)) else None
+    return {"n_input_tokens": _int(pin), "n_output_tokens": _int(pout),
+            "n_cache_tokens": _int(cached)}
+
+
+def _safe_trace(tracer: Optional[Callable[[dict], None]], span: dict) -> None:
+    if tracer is None:
+        return
+    try:
+        tracer(span)
+    except Exception:
+        pass
+
+
 @dataclass
 class LoopResult:
     """Outcome of one ``run_loop`` trajectory (backend-agnostic)."""
@@ -58,6 +88,9 @@ class LoopResult:
     n_actions: int
     elapsed_s: float
     messages: list[dict] = field(default_factory=list)
+    n_input_tokens: Optional[int] = None
+    n_output_tokens: Optional[int] = None
+    n_cache_tokens: Optional[int] = None
 
 SYSTEM_PROMPT = """You are a senior software engineer working in a fresh shell.
 
@@ -202,8 +235,15 @@ class CodingAgent(Agent):
             self._session = None
 
     async def _send(self, messages: list[dict]) -> str:
+        content, _usage = await self._send_with_usage(messages)
+        return content
+
+    async def _send_with_usage(
+        self, messages: list[dict]
+    ) -> tuple[str, Optional[dict]]:
+        """Like ``_send`` but also returns parsed token usage (None via send_fn)."""
         if self._send_fn is not None:
-            return await self._send_fn(messages)
+            return await self._send_fn(messages), None
         if not (self._url and self._model):
             raise ValueError(
                 "CodingAgent needs (url + model) or a send_fn to talk to a model"
@@ -222,13 +262,8 @@ class CodingAgent(Agent):
         async with sess.post(self._url, headers=headers, json=body) as resp:
             text = await resp.text()
             if resp.status >= 400:
-                # Surface the upstream error verbatim (truncated) — the
-                # exception bubbles up to AgentWorkloadType, which bucket-marks
-                # the sample as a real infrastructure failure ("fail").
                 excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
-                raise RuntimeError(
-                    f"model endpoint HTTP {resp.status}: {excerpt}"
-                )
+                raise RuntimeError(f"model endpoint HTTP {resp.status}: {excerpt}")
             import json as _json
             try:
                 data = _json.loads(text)
@@ -240,7 +275,8 @@ class CodingAgent(Agent):
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"model endpoint returned no choices: {data!r}")
-        return (choices[0].get("message") or {}).get("content") or ""
+        content = (choices[0].get("message") or {}).get("content") or ""
+        return content, parse_openai_usage(data)
 
     # ---- action / shell ----------------------------------------------- #
 
@@ -362,6 +398,7 @@ class CodingAgent(Agent):
         *,
         system_prompt: Optional[str] = None,
         instance_template: Optional[str] = None,
+        tracer: Optional[Callable[[dict], None]] = None,
     ) -> LoopResult:
         """Drive the model/observe loop against an injected ``executor``.
 
@@ -387,6 +424,8 @@ class CodingAgent(Agent):
         n_actions = 0
         submission: Optional[str] = None
         exit_status = "step_limit"
+        tot_in = tot_out = tot_cache = 0
+        have_tokens = False
 
         while True:
             if n_calls >= self._step_limit:
@@ -396,8 +435,25 @@ class CodingAgent(Agent):
                 exit_status = "time_limit"
                 break
 
-            reply = await self._send(messages)
+            t0 = datetime.now(timezone.utc)
+            reply, usage = await self._send_with_usage(messages)
+            t1 = datetime.now(timezone.utc)
             n_calls += 1
+            if tracer is not None:
+                _safe_trace(tracer, {
+                    "kind": "llm_call", "name": "llm_call", "seq": n_calls,
+                    "start": t0.isoformat(), "end": t1.isoformat(),
+                    "duration_s": (t1 - t0).total_seconds(),
+                    "rc": None,
+                    "n_input_tokens": (usage or {}).get("n_input_tokens"),
+                    "n_output_tokens": (usage or {}).get("n_output_tokens"),
+                    "n_cache_tokens": (usage or {}).get("n_cache_tokens"),
+                })
+            if usage is not None:
+                have_tokens = True
+                tot_in += usage.get("n_input_tokens") or 0
+                tot_out += usage.get("n_output_tokens") or 0
+                tot_cache += usage.get("n_cache_tokens") or 0
             messages.append({"role": "assistant", "content": reply})
 
             action = self._parse_action(reply)
@@ -411,8 +467,16 @@ class CodingAgent(Agent):
                 exit_status = "submitted"
                 break
 
+            e0 = datetime.now(timezone.utc)
             rc, output = await executor(action, self._timeout_per_step_s)
+            e1 = datetime.now(timezone.utc)
             n_actions += 1
+            if tracer is not None:
+                _safe_trace(tracer, {
+                    "kind": "sandbox_exec", "name": "sandbox_exec", "seq": n_actions,
+                    "rc": rc, "start": e0.isoformat(), "end": e1.isoformat(),
+                    "duration_s": (e1 - e0).total_seconds(),
+                })
             obs = self._truncate(output)
             messages.append({
                 "role": "user",
@@ -426,6 +490,9 @@ class CodingAgent(Agent):
             n_actions=n_actions,
             elapsed_s=time.monotonic() - start,
             messages=messages,
+            n_input_tokens=tot_in if have_tokens else None,
+            n_output_tokens=tot_out if have_tokens else None,
+            n_cache_tokens=tot_cache if have_tokens else None,
         )
 
     async def run(self, ctx: AgentContext) -> AgentResult:
