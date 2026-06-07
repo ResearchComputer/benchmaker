@@ -83,3 +83,47 @@ def test_util_row_handles_empty_nodes():
     )
     row = obs.util_row_from_status(status, t=0.0, wall=datetime.now(timezone.utc))
     assert row["nodes"] == [] and row["sandbox_count"] == 0
+
+
+def test_summarize_phases_and_agent_and_util():
+    spans = [
+        obs._span("t1", "task1", "phase", "agent_execution", duration_s=100.0),
+        obs._span("t2", "task2", "phase", "agent_execution", duration_s=300.0),
+        obs._span("t1", "task1", "llm_call", "llm_call", duration_s=2.0,
+                  n_input_tokens=1000, n_output_tokens=200),
+        obs._span("t1", "task1", "llm_call", "llm_call", duration_s=4.0,
+                  n_input_tokens=1500, n_output_tokens=None),
+        obs._span("t1", "task1", "sandbox_exec", "sandbox_exec", duration_s=1.0, rc=0),
+    ]
+    util_rows = [
+        {"sandbox_count": 5, "node_count": 12, "available_node_count": 11},
+        {"sandbox_count": 10, "node_count": 12, "available_node_count": 10},
+    ]
+    s = obs.summarize(spans, util_rows)
+    ph = s["phases"]["agent_execution"]
+    assert ph["count"] == 2 and ph["mean_s"] == 200.0
+    assert abs(ph["p90_s"] - 280.0) < 1e-6     # interp between 100 and 300 at q=.9
+    ag = s["agent"]
+    assert ag["n_llm_calls"] == 2 and ag["n_exec"] == 1
+    assert ag["total_input_tokens"] == 2500 and ag["total_output_tokens"] == 200
+    assert ag["llm_mean_s"] == 3.0
+    u = s["utilization"]
+    assert u["sandbox_peak"] == 10 and u["sandbox_mean"] == 7.5
+    assert u["node_count"] == 12 and u["polls"] == 2
+
+
+def test_summarize_empty_is_safe():
+    s = obs.summarize([], [])
+    assert s["phases"] == {} and s["agent"]["n_llm_calls"] == 0
+    assert s["utilization"]["sandbox_peak"] is None
+    # format_summary must not raise on empty input
+    assert isinstance(obs.format_summary(s), str)
+
+
+def test_format_summary_mentions_sections():
+    s = obs.summarize(
+        [obs._span("t1", "k", "phase", "verifier", duration_s=44.0)],
+        [{"sandbox_count": 3, "node_count": 4, "available_node_count": 4}],
+    )
+    text = obs.format_summary(s)
+    assert "verifier" in text and "sandbox" in text.lower()
