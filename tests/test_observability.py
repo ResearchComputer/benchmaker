@@ -385,3 +385,22 @@ def test_harbor_eval_parse_args_has_timeline_flags(monkeypatch):
     args = he._parse_args()
     assert args.timeline is True                  # default on
     assert args.utilization_interval_sec == 5.0
+
+
+def test_swebench_recipe_exposes_timeline_options():
+    import benchmaker.recipes.swebench  # noqa: F401  (registers the recipe)
+    from benchmaker.recipes.swebench import SWEBenchRecipe
+
+    recipe = SWEBenchRecipe()
+    import click
+
+    @click.command()
+    def _cmd():
+        pass
+
+    cmd = _cmd
+    for opt in recipe.options():
+        cmd = opt(cmd)
+    names = {p.name for p in cmd.params}
+    assert "timeline" in names
+    assert "utilization_interval_sec" in names

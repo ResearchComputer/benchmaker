@@ -82,7 +82,20 @@ class SWEBenchRecipe(Recipe):
                          type=click.Path(exists=True, dir_okay=False),
                          help="YAML forwarded to the agent's config_file kwarg."),
             click.option("--job-name", "job_name", default=None,
-                         help="Harbor job name (defaults to a timestamp)."),
+                         help="Harbor job name (defaults to "
+                              "<datetime>_<randhex>)."),
+            click.option("--jobs-dir", "jobs_dir", default=None,
+                         type=click.Path(file_okay=False),
+                         help="Parent directory for run bundles. The job is "
+                              "written to <jobs-dir>/<job-name>/ (default 'jobs')."),
+            click.option("--timeline/--no-timeline", "timeline", default=True,
+                         show_default=True,
+                         help="Capture timeline + machine utilization + tokens, "
+                              "writing timeline.jsonl / utilization.jsonl / "
+                              "trajectories.jsonl into the job dir."),
+            click.option("--utilization-interval-sec", "utilization_interval_sec",
+                         type=float, default=5.0, show_default=True,
+                         help="Seconds between /status utilization polls."),
             click.option("--list-agents", "list_agents", is_flag=True,
                          help="List registry agent keys and exit."),
         ]
@@ -91,9 +104,11 @@ class SWEBenchRecipe(Recipe):
             n_tasks, task, concurrency, n_attempts, timeout_multiplier,
             force_build, backend_type, request_timeout_sec,
             agent_ready_timeout_sec, agent_kwarg, agent_config_file, job_name,
-            list_agents) -> Optional[int]:
+            jobs_dir, list_agents, timeline, utilization_interval_sec) -> Optional[int]:
         import argparse
         import asyncio
+        import secrets
+        from datetime import datetime
 
         # harbor_eval imports the (now required) `harbor` package at module top;
         # import it lazily so the recipe registry doesn't pull harbor in eagerly.
@@ -120,6 +135,13 @@ class SWEBenchRecipe(Recipe):
             raise click.UsageError(
                 "--model required (or set OPENAI_COMPATIBLE_MODEL).")
 
+        # Default to a unique, sortable run id: <datetime>_<randhex>. With the
+        # default jobs_dir ('jobs'), the bundle lands in
+        # jobs/<datetime>_<randhex>/. An explicit --job-name overrides this.
+        if not job_name:
+            job_name = (f"{datetime.now().strftime('%Y-%m-%d__%H-%M-%S')}"
+                        f"_{secrets.token_hex(3)}")
+
         # Reuse harbor_eval's JobConfig builder by handing it an argparse-shaped
         # namespace (the same field names its CLI produces).
         ns = argparse.Namespace(
@@ -141,20 +163,28 @@ class SWEBenchRecipe(Recipe):
             request_timeout_sec=request_timeout_sec,
             agent_ready_timeout_sec=agent_ready_timeout_sec,
             job_name=job_name,
+            jobs_dir=jobs_dir,
         )
         job_config = he._build_job_config(ns)
 
         click.echo(f"harbor job: dataset={dataset} agent={agent} model={model} "
                    f"flash={os.environ.get('FLASH_SANDBOX_URL', '—')}")
 
-        async def _go():
-            from harbor.job import Job
-            job = await Job.create(job_config)
-            return job, await job.run()
+        from benchmaker.swebench.observability import run_job_with_observability
 
-        job, job_result = asyncio.run(_go())
+        async def _go():
+            return await run_job_with_observability(
+                job_config,
+                flash_url=os.environ.get("FLASH_SANDBOX_URL"),
+                util_interval=utilization_interval_sec,
+                enabled=timeline,
+            )
+
+        job, job_result, summary_text = asyncio.run(_go())
         rows, accuracy = he._summarise(job_result)
         he._print_summary(rows, accuracy)
+        if summary_text:
+            click.echo(summary_text)
         click.echo(f"\njob dir: {job.job_dir}")
         return None
 
