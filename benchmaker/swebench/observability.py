@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -356,6 +356,23 @@ def _write_jsonl(path: Any, rows: list[dict]) -> None:
         log.warning("failed to write %s: %s", path, e)
 
 
+def _normalize_span(sp: dict, task_map: dict) -> dict:
+    """Return ``sp`` widened to the full span schema, resolving trial/task.
+
+    Phase and pi spans already use ``_span`` (full schema); the fine-grained
+    ``llm_call``/``sandbox_exec`` spans emitted by the agent loops carry only a
+    subset. This fills every missing key with its ``_span`` default and stamps
+    ``task`` from ``task_map`` when the span lacks one.
+    """
+    trial = sp.get("trial") or ""
+    task = sp.get("task") or task_map.get(trial, "")
+    full = _span(trial, task, sp.get("kind", "") or "", sp.get("name", "") or "")
+    full.update(sp)
+    full["trial"] = trial
+    full["task"] = task
+    return full
+
+
 class JobObserver:
     """Collects harbor trial-hook events + ``/status`` utilization for one job,
     then writes ``timeline.jsonl`` / ``utilization.jsonl`` / ``trajectories.jsonl``
@@ -422,9 +439,16 @@ class JobObserver:
         except Exception:
             log.warning("flash-sandbox not importable; utilization polling disabled")
             return
-        self._client = AsyncHTTPClient(address=self._flash_url, timeout=30.0)
-        self._t0 = time.monotonic()
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        # Best-effort: a poller that can't be constructed must never abort the
+        # job — it just means no utilization data for this run.
+        try:
+            self._client = AsyncHTTPClient(address=self._flash_url, timeout=30.0)
+            self._t0 = time.monotonic()
+            self._poll_task = asyncio.create_task(self._poll_loop())
+        except Exception as e:
+            log.warning("failed to start utilization poller: %s", e)
+            self._client = None
+            self._poll_task = None
 
     async def _poll_loop(self) -> None:
         fails = 0
@@ -435,6 +459,7 @@ class JobObserver:
                 self._util_rows.append(util_row_from_status(
                     status, time.monotonic() - self._t0, datetime.now(timezone.utc)))
                 fails = 0
+                warned = False  # recovered; re-arm the warning for a fresh failure burst
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -468,20 +493,38 @@ class JobObserver:
     def write(self, job_dir: Any) -> str:
         """Write the three artifacts and return the printable summary text."""
         job_dir = Path(job_dir)
+        # trial -> task, so fine-grained/pi spans (which only know their trial,
+        # from the dir path) can be stamped with the task name.
+        task_map = {
+            (getattr(r, "trial_name", "") or ""): (getattr(r, "task_name", "") or "")
+            for r in self._results
+        }
         spans: list[dict] = []
         for r in self._results:
             try:
                 spans.extend(phase_spans_from_result(r))
             except Exception:
                 pass
-        spans.extend(merge_span_files(job_dir))
-        for f in sorted(job_dir.rglob("pi-*.log")):
+        try:
+            spans.extend(merge_span_files(job_dir))
+        except Exception:
+            pass
+        try:
+            pi_logs = sorted(job_dir.rglob("pi-*.log"))
+        except Exception:
+            pi_logs = []
+        for f in pi_logs:
             trial = _trial_from_path(f, job_dir)
             try:
-                spans.extend(parse_pi_token_spans(f.read_text(), trial=trial))
+                spans.extend(parse_pi_token_spans(
+                    f.read_text(), trial=trial, task=task_map.get(trial, "")))
             except Exception:
                 pass
 
+        # Fine-grained spans from the agent loops carry only a subset of fields;
+        # normalize every span to the full schema (filling task from the map) so
+        # timeline.jsonl rows are uniform for downstream analysis.
+        spans = [_normalize_span(sp, task_map) for sp in spans]
         _write_jsonl(job_dir / "timeline.jsonl", spans)
         _write_jsonl(job_dir / "utilization.jsonl", self._util_rows)
         try:
@@ -491,11 +534,6 @@ class JobObserver:
         _write_jsonl(job_dir / "trajectories.jsonl", manifest)
 
         return format_summary(summarize(spans, self._util_rows))
-
-
-@asynccontextmanager
-async def _nullcontext():
-    yield
 
 
 async def run_job_with_observability(
@@ -514,7 +552,7 @@ async def run_job_with_observability(
     if observer is not None:
         observer.attach(job)
 
-    cm = observer.utilization() if observer is not None else _nullcontext()
+    cm = observer.utilization() if observer is not None else nullcontext()
     async with cm:
         job_result = await job.run()
 

@@ -371,6 +371,42 @@ def test_job_observer_write_produces_all_artifacts(tmp_path):
     assert "observability" in summary_text
 
 
+_FULL_SPAN_KEYS = {
+    "trial", "task", "kind", "name", "start", "end", "duration_s", "seq", "rc",
+    "n_input_tokens", "n_output_tokens", "n_cache_tokens", "cost_usd", "extra",
+}
+
+
+def test_job_observer_normalizes_schema_and_stamps_task(tmp_path):
+    # A fine-grained llm_call span as the agent loop actually emits it: a PARTIAL
+    # dict missing trial/task/cost_usd/extra. write() must widen it to the full
+    # schema and stamp the task from the trial->task map.
+    tdir = tmp_path / "t1" / "logs"
+    tdir.mkdir(parents=True)
+    (tdir / "timeline-spans.jsonl").write_text(json.dumps({
+        "kind": "llm_call", "name": "llm_call", "seq": 1,
+        "start": "2026-06-07T12:00:00+00:00", "end": "2026-06-07T12:00:02+00:00",
+        "duration_s": 2.0, "rc": None,
+        "n_input_tokens": 40, "n_output_tokens": 4, "n_cache_tokens": 0,
+    }) + "\n")
+
+    r = _fake_result(trial="t1", task="task1",
+                     phases={"agent_execution": _ti(0, 10)})
+    observer = obs.JobObserver(flash_url=None, interval=5.0)
+    observer._results = [r]
+    observer.write(tmp_path)
+
+    timeline = [json.loads(x) for x in
+                (tmp_path / "timeline.jsonl").read_text().splitlines() if x.strip()]
+    # EVERY row carries the full, uniform key set.
+    for sp in timeline:
+        assert set(sp.keys()) == _FULL_SPAN_KEYS
+    fine = next(s for s in timeline if s["kind"] == "llm_call")
+    assert fine["trial"] == "t1" and fine["task"] == "task1"   # stamped from map
+    assert fine["cost_usd"] is None and fine["extra"] == {}     # filled defaults
+    assert fine["n_input_tokens"] == 40                         # original preserved
+
+
 def test_harbor_eval_parse_args_has_timeline_flags(monkeypatch):
     import sys
     from benchmaker.swebench import harbor_eval as he
