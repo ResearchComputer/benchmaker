@@ -248,3 +248,106 @@ def parse_pi_token_spans(text: str, *, trial: str = "", task: str = "") -> list[
             cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         ))
     return spans
+
+
+def _trial_from_path(path: Path, job_dir: Path) -> str:
+    try:
+        return path.relative_to(job_dir).parts[0]
+    except Exception:
+        return ""
+
+
+def merge_span_files(job_dir: Any) -> list[dict]:
+    """Recursively read every ``timeline-spans.jsonl`` under ``job_dir``.
+
+    Agents write spans under their ``logs_dir`` (nested in the trial dir); the
+    first path component under ``job_dir`` is the trial name, applied only when a
+    span does not already carry one.
+    """
+    job_dir = Path(job_dir)
+    spans: list[dict] = []
+    for f in sorted(job_dir.rglob("timeline-spans.jsonl")):
+        trial = _trial_from_path(f, job_dir)
+        try:
+            text = f.read_text()
+        except Exception:
+            continue
+        for raw in text.splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                sp = json.loads(raw)
+            except Exception:
+                continue
+            if not sp.get("trial"):
+                sp["trial"] = trial
+            spans.append(sp)
+    return spans
+
+
+def _reward_of(result: Any) -> Optional[float]:
+    vr = getattr(result, "verifier_result", None)
+    rewards = getattr(vr, "rewards", None) if vr is not None else None
+    if not rewards:
+        return None
+    for key in ("reward", "default"):
+        if key in rewards:
+            return float(rewards[key])
+    return float(next(iter(rewards.values())))
+
+
+_TRAJECTORY_GLOBS = ("*.trajectory.json", "pi-*.log",
+                     "**/*.trajectory.json", "**/pi-*.log")
+
+
+def trajectory_manifest_rows(results: list, job_dir: Any) -> list[dict]:
+    """One ``trajectories.jsonl`` row per trial: reward, tokens, and the relative
+    paths of that trial's trajectory artifacts (indexed, not copied)."""
+    job_dir = Path(job_dir)
+    rows: list[dict] = []
+    for r in results:
+        reward = _reward_of(r)
+        try:
+            n_in, n_cache, n_out, cost = r.compute_token_cost_totals()
+        except Exception:
+            n_in = n_cache = n_out = cost = None
+        meta = {}
+        ar = getattr(r, "agent_result", None)
+        if ar is not None and getattr(ar, "metadata", None):
+            meta = ar.metadata
+        trial = getattr(r, "trial_name", "") or ""
+        paths: set[str] = set()
+        tdir = job_dir / trial
+        if tdir.exists():
+            for pat in _TRAJECTORY_GLOBS:
+                for p in tdir.glob(pat):
+                    try:
+                        paths.add(str(p.relative_to(job_dir)))
+                    except Exception:
+                        paths.add(str(p))
+        rows.append({
+            "trial": trial,
+            "task": getattr(r, "task_name", "") or "",
+            "reward": reward,
+            "passed": reward is not None and reward >= 1.0,
+            "exit_status": meta.get("exit_status"),
+            "n_calls": meta.get("n_calls"),
+            "n_actions": meta.get("n_actions"),
+            "n_input_tokens": n_in,
+            "n_output_tokens": n_out,
+            "n_cache_tokens": n_cache,
+            "cost_usd": cost,
+            "trajectory_paths": sorted(paths),
+        })
+    return rows
+
+
+def _write_jsonl(path: Any, rows: list[dict]) -> None:
+    """Write rows as JSONL; best-effort (log + return on failure)."""
+    try:
+        with Path(path).open("w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, default=str) + "\n")
+    except Exception as e:  # pragma: no cover - fs failure
+        log.warning("failed to write %s: %s", path, e)

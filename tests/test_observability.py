@@ -161,3 +161,47 @@ def test_parse_pi_token_spans_missing_and_renamed_fields_degrade():
     assert len(spans) == 2
     assert spans[0]["n_output_tokens"] == 7 and spans[0]["start"] is None
     assert spans[1]["n_input_tokens"] == 5 and spans[1]["start"] is not None
+
+
+def test_merge_span_files_stamps_trial_from_path(tmp_path):
+    # <job>/trial-a/agent-logs/timeline-spans.jsonl  -> trial "trial-a"
+    d = tmp_path / "trial-a" / "agent-logs"
+    d.mkdir(parents=True)
+    (d / "timeline-spans.jsonl").write_text(
+        json.dumps({"kind": "llm_call", "seq": 1}) + "\n"
+        + json.dumps({"kind": "sandbox_exec", "seq": 1, "trial": "explicit"}) + "\n"
+    )
+    spans = obs.merge_span_files(tmp_path)
+    assert len(spans) == 2
+    # path-derived trial when absent; preserved when already set
+    assert spans[0]["trial"] == "trial-a"
+    assert spans[1]["trial"] == "explicit"
+
+
+def test_trajectory_manifest_rows(tmp_path):
+    tdir = tmp_path / "t1"
+    (tdir / "logs").mkdir(parents=True)
+    (tdir / "logs" / "benchmaker-host.trajectory.json").write_text("{}")
+    (tdir / "logs" / "pi-host.log").write_text("{}")
+    r = _fake_result(
+        trial="t1", task="task1", rewards={"reward": 1.0},
+        totals=(2500, 100, 200, 0.01),
+        metadata={"exit_status": "submitted", "n_calls": 5, "n_actions": 4},
+    )
+    rows = obs.trajectory_manifest_rows([r], tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["trial"] == "t1" and row["reward"] == 1.0 and row["passed"] is True
+    assert row["exit_status"] == "submitted" and row["n_calls"] == 5
+    assert row["n_input_tokens"] == 2500 and row["n_output_tokens"] == 200
+    assert row["cost_usd"] == 0.01
+    paths = set(row["trajectory_paths"])
+    assert "t1/logs/benchmaker-host.trajectory.json" in paths
+    assert "t1/logs/pi-host.log" in paths
+
+
+def test_write_jsonl_roundtrip(tmp_path):
+    p = tmp_path / "x.jsonl"
+    obs._write_jsonl(p, [{"a": 1}, {"b": 2}])
+    lines = p.read_text().splitlines()
+    assert [json.loads(x) for x in lines] == [{"a": 1}, {"b": 2}]
