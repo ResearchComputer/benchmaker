@@ -334,3 +334,38 @@ async def test_pi_exec_bridge_emits_spans(tmp_path):
     assert len(spans) == 1
     assert spans[0]["kind"] == "sandbox_exec" and spans[0]["rc"] == 0
     assert spans[0]["seq"] == 1 and spans[0]["duration_s"] is not None
+
+
+def test_job_observer_write_produces_all_artifacts(tmp_path):
+    # one trial dir with a fine-grained span file and a pi log
+    tdir = tmp_path / "t1" / "logs"
+    tdir.mkdir(parents=True)
+    (tdir / "timeline-spans.jsonl").write_text(
+        json.dumps(obs._span("", "", "llm_call", "llm_call", seq=1, duration_s=2.0,
+                              n_input_tokens=50, n_output_tokens=5)) + "\n"
+    )
+    (tdir / "pi-host.log").write_text(
+        json.dumps({"usage": {"input": 300, "output": 20}}) + "\n"
+    )
+
+    r = _fake_result(trial="t1", task="task1",
+                     phases={"agent_execution": _ti(0, 10)},
+                     rewards={"reward": 1.0}, totals=(350, 0, 25, 0.02),
+                     metadata={"exit_status": "submitted"})
+
+    observer = obs.JobObserver(flash_url=None, interval=5.0)
+    observer._results = [r]                       # what the END hook would collect
+    observer._util_rows = [{"sandbox_count": 4, "node_count": 6,
+                            "available_node_count": 6}]
+    summary_text = observer.write(tmp_path)
+
+    timeline = [json.loads(x) for x in
+                (tmp_path / "timeline.jsonl").read_text().splitlines() if x.strip()]
+    kinds = sorted(s["kind"] for s in timeline)
+    assert kinds == ["llm_call", "llm_call", "phase"]   # phase + fine + pi
+    util = (tmp_path / "utilization.jsonl").read_text().splitlines()
+    assert len(util) == 1
+    manifest = [json.loads(x) for x in
+                (tmp_path / "trajectories.jsonl").read_text().splitlines() if x.strip()]
+    assert manifest[0]["trial"] == "t1" and manifest[0]["passed"] is True
+    assert "observability" in summary_text

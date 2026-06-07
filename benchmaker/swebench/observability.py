@@ -9,8 +9,11 @@ must never raise into a harbor trial. See
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -351,3 +354,174 @@ def _write_jsonl(path: Any, rows: list[dict]) -> None:
                 fh.write(json.dumps(r, default=str) + "\n")
     except Exception as e:  # pragma: no cover - fs failure
         log.warning("failed to write %s: %s", path, e)
+
+
+class JobObserver:
+    """Collects harbor trial-hook events + ``/status`` utilization for one job,
+    then writes ``timeline.jsonl`` / ``utilization.jsonl`` / ``trajectories.jsonl``
+    and returns a printable summary. Every method is best-effort."""
+
+    def __init__(self, flash_url: Optional[str], interval: float = 5.0):
+        self._flash_url = flash_url
+        self._interval = float(interval)
+        self._results: list = []          # harbor TrialResult objects (END hook)
+        self._events: list[dict] = []     # lightweight progress log
+        self._util_rows: list[dict] = []
+        self._client: Any = None
+        self._poll_task: Any = None
+        self._t0: float = 0.0
+
+    # ---- harbor hooks ------------------------------------------------- #
+
+    def attach(self, job: Any) -> "JobObserver":
+        async def on_event(ev: Any) -> None:
+            try:
+                self._events.append({
+                    "event": getattr(ev.event, "value", str(ev.event)),
+                    "trial": ev.trial_id, "task": ev.task_name,
+                    "timestamp": ev.timestamp.isoformat(),
+                })
+            except Exception:
+                pass
+
+        async def on_end(ev: Any) -> None:
+            try:
+                await on_event(ev)
+                if getattr(ev, "result", None) is not None:
+                    self._results.append(ev.result)
+            except Exception:
+                pass
+
+        try:
+            job.on_trial_started(on_event)
+            job.on_environment_started(on_event)
+            job.on_agent_started(on_event)
+            job.on_verification_started(on_event)
+            job.on_trial_cancelled(on_event)
+            job.on_trial_ended(on_end)
+        except Exception as e:  # pragma: no cover
+            log.warning("failed to attach trial hooks: %s", e)
+        return self
+
+    # ---- utilization poller ------------------------------------------ #
+
+    @asynccontextmanager
+    async def utilization(self):
+        await self._start_poller()
+        try:
+            yield
+        finally:
+            await self._stop_poller()
+
+    async def _start_poller(self) -> None:
+        if not self._flash_url:
+            log.warning("no FLASH_SANDBOX_URL; utilization polling disabled")
+            return
+        try:
+            from flash_sandbox import AsyncHTTPClient
+        except Exception:
+            log.warning("flash-sandbox not importable; utilization polling disabled")
+            return
+        self._client = AsyncHTTPClient(address=self._flash_url, timeout=30.0)
+        self._t0 = time.monotonic()
+        self._poll_task = asyncio.create_task(self._poll_loop())
+
+    async def _poll_loop(self) -> None:
+        fails = 0
+        warned = False
+        while True:
+            try:
+                status = await self._client.cluster_status()
+                self._util_rows.append(util_row_from_status(
+                    status, time.monotonic() - self._t0, datetime.now(timezone.utc)))
+                fails = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                fails += 1
+                if fails >= 3 and not warned:
+                    log.warning("utilization /status polling failing: %s", e)
+                    warned = True
+                else:
+                    log.debug("utilization poll failed: %s", e)
+            await asyncio.sleep(self._interval)
+
+    async def _stop_poller(self) -> None:
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._poll_task = None
+        if self._client is not None:
+            try:
+                await self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
+    # ---- artifacts ---------------------------------------------------- #
+
+    def write(self, job_dir: Any) -> str:
+        """Write the three artifacts and return the printable summary text."""
+        job_dir = Path(job_dir)
+        spans: list[dict] = []
+        for r in self._results:
+            try:
+                spans.extend(phase_spans_from_result(r))
+            except Exception:
+                pass
+        spans.extend(merge_span_files(job_dir))
+        for f in sorted(job_dir.rglob("pi-*.log")):
+            trial = _trial_from_path(f, job_dir)
+            try:
+                spans.extend(parse_pi_token_spans(f.read_text(), trial=trial))
+            except Exception:
+                pass
+
+        _write_jsonl(job_dir / "timeline.jsonl", spans)
+        _write_jsonl(job_dir / "utilization.jsonl", self._util_rows)
+        try:
+            manifest = trajectory_manifest_rows(self._results, job_dir)
+        except Exception:
+            manifest = []
+        _write_jsonl(job_dir / "trajectories.jsonl", manifest)
+
+        return format_summary(summarize(spans, self._util_rows))
+
+
+@asynccontextmanager
+async def _nullcontext():
+    yield
+
+
+async def run_job_with_observability(
+    job_config: Any, *, flash_url: Optional[str], util_interval: float = 5.0,
+    enabled: bool = True,
+) -> tuple:
+    """Create + run a harbor Job, optionally wrapped in observability.
+
+    Returns ``(job, job_result, summary_text)``; ``summary_text`` is None when
+    disabled. The caller still prints harbor's own accuracy table.
+    """
+    from harbor.job import Job
+
+    job = await Job.create(job_config)
+    observer = JobObserver(flash_url, util_interval) if enabled else None
+    if observer is not None:
+        observer.attach(job)
+
+    cm = observer.utilization() if observer is not None else _nullcontext()
+    async with cm:
+        job_result = await job.run()
+
+    summary_text = None
+    if observer is not None:
+        try:
+            summary_text = observer.write(job.job_dir)
+        except Exception as e:
+            log.warning("observability write failed: %s", e)
+    return job, job_result, summary_text
