@@ -302,3 +302,35 @@ async def test_host_agent_writes_spans_and_tokens(tmp_path):
     # token totals populated onto the harbor context
     assert ctx.n_input_tokens == 220 and ctx.n_output_tokens == 15
     assert ctx.metadata["exit_status"] == "submitted"
+
+
+async def test_pi_exec_bridge_emits_spans(tmp_path):
+    import aiohttp
+    from benchmaker.swebench.pi_agent import _ExecBridge
+
+    class FakeExecRes:
+        return_code = 0
+        stdout = "hi\n"
+        stderr = ""
+
+    class FakeEnv:
+        async def exec(self, command, cwd=None, timeout_sec=None):
+            return FakeExecRes()
+
+    spans_path = tmp_path / "timeline-spans.jsonl"
+    bridge = _ExecBridge(FakeEnv(), cwd="/testbed", exec_timeout_s=30.0,
+                         spans_path=spans_path)
+    await bridge.start()
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"{bridge.url}/exec",
+                              json={"command": "echo hi"}) as resp:
+                body = await resp.json()
+                assert body["return_code"] == 0
+    finally:
+        await bridge.stop()
+
+    spans = [json.loads(x) for x in spans_path.read_text().splitlines() if x.strip()]
+    assert len(spans) == 1
+    assert spans[0]["kind"] == "sandbox_exec" and spans[0]["rc"] == 0
+    assert spans[0]["seq"] == 1 and spans[0]["duration_s"] is not None

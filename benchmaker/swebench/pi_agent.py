@@ -39,6 +39,7 @@ import base64
 import json
 import os
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,6 +47,13 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.utils.env import resolve_env_vars
+
+from benchmaker.swebench._flash_hardening import harden_flash_sandbox_client
+
+# harbor loads this module via the agent ``import_path`` *before* it starts the
+# flash-sandbox environment, so patching the HTTP client here means the hardened
+# session is the one harbor actually uses. Idempotent; no-op without flash-sandbox.
+harden_flash_sandbox_client()
 
 PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 PROVIDER_NAME = "bench"  # the models.json provider id we register for pi
@@ -358,7 +366,8 @@ class PiHostAgent(_PiAgentBase):
         base_url, model, api_key = self._resolved()
 
         bridge = _ExecBridge(environment, cwd=self._cwd,
-                             exec_timeout_s=self._exec_timeout_s, host=self._bridge_host)
+                             exec_timeout_s=self._exec_timeout_s, host=self._bridge_host,
+                             spans_path=Path(self.logs_dir) / "timeline-spans.jsonl")
         await bridge.start()
         home = Path(self.logs_dir) / "pi-home"
         try:
@@ -431,7 +440,8 @@ class _ExecBridge:
     """A 127.0.0.1 HTTP server: ``POST /exec {command,timeout}`` -> environment.exec."""
 
     def __init__(self, environment: BaseEnvironment, *, cwd: str,
-                 exec_timeout_s: float, host: str = "127.0.0.1"):
+                 exec_timeout_s: float, host: str = "127.0.0.1",
+                 spans_path: Optional[Path] = None):
         self._env = environment
         self._cwd = cwd
         self._exec_timeout_s = exec_timeout_s
@@ -439,6 +449,7 @@ class _ExecBridge:
         self._runner: Any = None
         self._port: int = 0
         self.count = 0
+        self._spans_path = spans_path
 
     @property
     def url(self) -> str:
@@ -454,14 +465,18 @@ class _ExecBridge:
             self.count += 1
             # Anchor at cwd without a subshell (matches the other agents).
             full = f"cd {shlex.quote(self._cwd)} && {command}" if self._cwd else command
+            start = datetime.now(timezone.utc)
             try:
                 res = await self._env.exec(command=full, cwd=self._cwd, timeout_sec=timeout)
+                rc = int(res.return_code)
+                self._emit_span(start, rc)
                 return web.json_response({
-                    "return_code": int(res.return_code),
+                    "return_code": rc,
                     "stdout": res.stdout or "",
                     "stderr": res.stderr or "",
                 })
             except Exception as e:  # noqa: BLE001
+                self._emit_span(start, -1)
                 return web.json_response(
                     {"return_code": -1, "stdout": "", "stderr": f"{type(e).__name__}: {e}"})
 
@@ -480,6 +495,20 @@ class _ExecBridge:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+
+    def _emit_span(self, start: "datetime", rc: int) -> None:
+        if self._spans_path is None:
+            return
+        end = datetime.now(timezone.utc)
+        try:
+            with self._spans_path.open("a") as fh:
+                fh.write(json.dumps({
+                    "kind": "sandbox_exec", "name": "sandbox_exec", "seq": self.count,
+                    "rc": rc, "start": start.isoformat(), "end": end.isoformat(),
+                    "duration_s": (end - start).total_seconds(),
+                }) + "\n")
+        except Exception:
+            pass
 
 
 def _task_item(context: AgentContext, instruction: str) -> dict[str, Any]:
