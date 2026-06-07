@@ -64,6 +64,15 @@ from harbor.models.environment_type import EnvironmentType  # noqa: E402
 from harbor.models.job.config import DatasetConfig, JobConfig  # noqa: E402
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig  # noqa: E402
 
+from benchmaker.swebench._flash_hardening import (  # noqa: E402
+    harden_flash_sandbox_client,
+)
+
+# Harden the flash-sandbox HTTP client before any Job runs (the `benchmaker
+# swebench` entrypoint). The `harbor run <config>` path is covered separately by
+# the agent modules' import-time call. Idempotent.
+harden_flash_sandbox_client()
+
 
 # Friendly key -> harbor agent spec. A spec is either {"name": <built-in>} or
 # {"import_path": "module:Class"} (a harbor BaseAgent subclass). Extend this to
@@ -202,6 +211,13 @@ def _build_job_config(args: argparse.Namespace) -> JobConfig:
     dataset = DatasetConfig(name=args.dataset, n_tasks=args.n_tasks,
                             task_names=args.task or None)
 
+    # Parent directory for the run bundle (harbor writes to <jobs_dir>/<job_name>).
+    # Omit when unset so harbor keeps its own default of "jobs".
+    job_kwargs: dict[str, Any] = {}
+    jobs_dir = getattr(args, "jobs_dir", None)
+    if jobs_dir:
+        job_kwargs["jobs_dir"] = Path(jobs_dir)
+
     return JobConfig(
         job_name=args.job_name or "",
         n_attempts=args.n_attempts,
@@ -211,6 +227,7 @@ def _build_job_config(args: argparse.Namespace) -> JobConfig:
         environment=environment,
         agents=[agent],
         datasets=[dataset],
+        **job_kwargs,
     )
 
 
@@ -297,6 +314,16 @@ def _parse_args() -> argparse.Namespace:
                         "(harbor default was 30s — too low for big SWE-bench "
                         "images + high concurrency).")
     p.add_argument("--job-name", default=None)
+    p.add_argument("--jobs-dir", default=None,
+                   help="Parent directory for the run bundle "
+                        "(harbor writes to <jobs-dir>/<job-name>; default 'jobs').")
+    p.add_argument("--timeline", dest="timeline", action="store_true", default=True,
+                   help="Capture timeline + utilization + tokens (default on).")
+    p.add_argument("--no-timeline", dest="timeline", action="store_false",
+                   help="Disable observability capture.")
+    p.add_argument("--utilization-interval-sec", dest="utilization_interval_sec",
+                   type=float, default=5.0,
+                   help="Seconds between /status utilization polls (default 5).")
     return p.parse_args()
 
 
@@ -321,11 +348,19 @@ async def _amain(args: argparse.Namespace) -> int:
     print(f"harbor job: dataset={args.dataset} agent={args.agent} "
           f"model={args.model} flash={os.environ.get('FLASH_SANDBOX_URL', '—')}")
 
-    job = await Job.create(job_config)
-    job_result = await job.run()
+    from benchmaker.swebench.observability import run_job_with_observability
+
+    job, job_result, summary_text = await run_job_with_observability(
+        job_config,
+        flash_url=os.environ.get("FLASH_SANDBOX_URL"),
+        util_interval=args.utilization_interval_sec,
+        enabled=args.timeline,
+    )
 
     rows, accuracy = _summarise(job_result)
     _print_summary(rows, accuracy)
+    if summary_text:
+        print(summary_text)
     print(f"\njob dir: {job.job_dir}")
     return 0 if rows and all(r["passed"] for r in rows) else 1
 

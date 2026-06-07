@@ -369,3 +369,19 @@ def test_job_observer_write_produces_all_artifacts(tmp_path):
                 (tmp_path / "trajectories.jsonl").read_text().splitlines() if x.strip()]
     assert manifest[0]["trial"] == "t1" and manifest[0]["passed"] is True
     assert "observability" in summary_text
+
+
+def test_harbor_eval_parse_args_has_timeline_flags(monkeypatch):
+    import sys
+    from benchmaker.swebench import harbor_eval as he
+
+    monkeypatch.setattr(sys, "argv", ["prog", "--no-timeline",
+                                      "--utilization-interval-sec", "2.5"])
+    args = he._parse_args()
+    assert args.timeline is False
+    assert args.utilization_interval_sec == 2.5
+
+    monkeypatch.setattr(sys, "argv", ["prog"])
+    args = he._parse_args()
+    assert args.timeline is True                  # default on
+    assert args.utilization_interval_sec == 5.0
