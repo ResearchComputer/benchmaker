@@ -83,6 +83,28 @@ def test_b64_write_roundtrips_offline():
     assert "mkdir -p" in cmd and "/a/b.txt" in cmd
 
 
+def test_pi_extension_args_caps_only_when_positive():
+    assert P.pi_extension_args("/x/max_turns.js", 5) == ["--extension", "/x/max_turns.js"]
+    assert P.pi_extension_args("/x/max_turns.js", 0) == []
+    assert P.pi_extension_args("/x/max_turns.js", -1) == []
+    assert P.pi_extension_args(None, 5) == []
+
+
+def test_pi_agent_coerces_and_stores_max_turns(tmp_path):
+    capped = P.PiContainerAgent(logs_dir=tmp_path, model_name="m", pi_max_turns="7")
+    assert capped._pi_max_turns == 7
+    default = P.PiContainerAgent(logs_dir=tmp_path, model_name="m")
+    assert default._pi_max_turns == 0
+    junk = P.PiContainerAgent(logs_dir=tmp_path, model_name="m", pi_max_turns="oops")
+    assert junk._pi_max_turns == 0
+
+
+def test_max_turns_extension_file_present_and_shaped():
+    assert P.MAX_TURNS_EXT.exists()
+    txt = P.MAX_TURNS_EXT.read_text()
+    assert "PI_MAX_TURNS" in txt and "turn_end" in txt and "export default" in txt
+
+
 # --------------------------- exec bridge (Mode 2 crux) --------------------- #
 
 @dataclass

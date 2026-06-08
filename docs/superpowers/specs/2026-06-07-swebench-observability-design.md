@@ -34,11 +34,16 @@ of a run we want, without changing what the agents do:
   cost_usd`; `TrialResult.compute_token_cost_totals()` aggregates them. Our
   `BenchmakerHostAgent` currently populates **none** of these (so harbor records
   no token data for our loop today).
-- Flash Sandbox: `GET /status` → cluster summary; flash-sandbox's
-  `AsyncHTTPClient(address=URL).cluster_status()` returns `ClusterStatus`
+- Flash Sandbox: `GET /status` → cluster summary
   (`node_count`, `available_node_count`, `unavailable_node_count`,
-  `sandbox_count`, `nodes:[ClusterNode(node_id, status, available,
-  running_count, …)]`). `?sandboxes=true` adds per-sandbox detail (not used).
+  `sandbox_count`, `nodes:[{id, status, available, running_count,
+  capacity:{total_memory_mb, available_memory_mb, total_cpu_cores,
+  available_cpu_cores}, …}]`). The poller reads the **raw** JSON dict via
+  `AsyncHTTPClient(address=URL)._get("status")` rather than the typed
+  `cluster_status()` helper, because the `ClusterStatus`/`ClusterNode` wrapper
+  drops each node's `capacity` block (the memory/CPU data we record).
+  `capacity` is `omitempty` server-side. `?sandboxes=true` adds per-sandbox
+  detail (not used).
 - `CodingAgent._send` receives an OpenAI-compatible response whose `usage` block
   (`prompt_tokens`, `completion_tokens`, …) is currently discarded.
 - pi `--mode json` emits JSONL to stdout (already captured to `pi-*.log`): a
@@ -66,12 +71,16 @@ Pure, unit-testable helpers (no I/O, no harbor/network deps in signatures):
 - `phase_spans_from_result(result) -> list[Span]` — map a `TrialResult`'s four
   `TimingInfo`s (+ trial/task names, reward, exit_status) to `kind="phase"`
   span dicts. Skips phases whose `TimingInfo` is `None`/unfinished.
-- `util_row_from_status(status, t, wall) -> dict` — `ClusterStatus` →
-  utilization row.
+- `util_row_from_status(status, t, wall) -> dict` — raw `/status` dict →
+  utilization row. Flattens per-node `capacity` into each node row and sums it
+  into cluster-level `total_memory_mb` / `available_memory_mb` /
+  `total_cpu_cores` / `available_cpu_cores` (omitted when no node reports
+  capacity).
 - `summarize(spans, util_rows) -> dict` — per-phase count/mean/p90; agent-internal
   totals (n llm_calls, mean call s, total in/out tokens; n execs, mean exec s)
   when present; utilization peak/mean `sandbox_count`, `node_count`, mean
-  available nodes.
+  available nodes; memory/CPU total + min-available (peak pressure) + mean
+  available when capacity was sampled.
 - `merge_span_files(job_dir) -> list[Span]` — recursively glob the job dir for
   `timeline-spans.jsonl` (agents write under their `logs_dir`, nested in the
   trial dir), stamp `trial` from the first path component under `job_dir`, return
@@ -189,17 +198,24 @@ Orchestration (the only parts that touch harbor / network / fs):
  "n_input_tokens":1840,"n_output_tokens":210,"n_cache_tokens":0,
  "cost_usd":0.0031,"extra":{}}
 ```
-`utilization.jsonl` — one poll per line:
+`utilization.jsonl` — one poll per line (cluster-level `*_memory_mb` /
+`*_cpu_cores` and per-node `capacity` fields appear only when nodes report
+`capacity`):
 ```json
 {"t":132.5,"wall":"<iso8601>","node_count":12,"available_node_count":11,
  "unavailable_node_count":1,"sandbox_count":8,
- "nodes":[{"id":"n1","available":true,"running_count":3}, …]}
+ "total_memory_mb":1536000,"available_memory_mb":960000,
+ "total_cpu_cores":384.0,"available_cpu_cores":210.5,
+ "nodes":[{"id":"n1","available":true,"running_count":3,
+           "total_memory_mb":128000,"available_memory_mb":96000,
+           "total_cpu_cores":32.0,"available_cpu_cores":20.0}, …]}
 ```
 `trajectories.jsonl` — one trial per line (manifest; see §4).
 
 Printed end-of-run summary (after harbor's accuracy table): per-phase
 count/mean/p90; agent-internal totals when present; utilization peak/mean
-sandbox_count, node_count, mean available nodes.
+sandbox_count, node_count, mean available nodes; memory/CPU total and
+min/mean available when capacity was sampled.
 
 ## CLI flags (added to both `recipes/swebench.py` and `harbor_eval.py`)
 
@@ -223,7 +239,8 @@ Pure unit tests (no network/harbor):
 - `phase_spans_from_result` over a hand-built `TrialResult`-shaped object
   (incl. missing/unfinished phases).
 - `util_row_from_status` over a `ClusterStatus`.
-- `summarize` (phase means/p90; token + exec totals; utilization peak/mean).
+- `summarize` (phase means/p90; token + exec totals; utilization peak/mean;
+  memory/CPU total + min/mean available, and absent-capacity → `None`).
 - `merge_span_files` over a temp job dir with two `timeline-spans.jsonl`.
 - `parse_pi_token_spans` over sample pi JSONL: nominal `{input,output,cacheRead,
   cacheWrite,cost:{total},timestamp}`; missing fields; non-JSON/header lines;

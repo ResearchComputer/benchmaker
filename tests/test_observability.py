@@ -62,27 +62,60 @@ def test_phase_spans_skips_unfinished():
 
 
 def test_util_row_from_status():
-    node = types.SimpleNamespace(node_id="n1", available=True, running_count=3)
-    status = types.SimpleNamespace(
-        node_count=2, available_node_count=1, unavailable_node_count=1,
-        sandbox_count=8, nodes=(node,),
-    )
+    # The raw GET /status payload (dict), not the typed ClusterStatus: the typed
+    # wrapper drops per-node `capacity`, so the poller reads the raw dict.
+    status = {
+        "node_count": 2, "available_node_count": 1, "unavailable_node_count": 1,
+        "sandbox_count": 8,
+        "nodes": [
+            {"id": "n1", "available": True, "running_count": 3,
+             "capacity": {"total_memory_mb": 64000, "available_memory_mb": 40000,
+                          "total_cpu_cores": 32.0, "available_cpu_cores": 20.0}},
+            {"id": "n2", "available": False, "running_count": 0,
+             "capacity": {"total_memory_mb": 16000, "available_memory_mb": 16000,
+                          "total_cpu_cores": 8.0, "available_cpu_cores": 8.0}},
+        ],
+    }
     wall = datetime(2026, 6, 7, 12, 2, 12, tzinfo=timezone.utc)
     row = obs.util_row_from_status(status, t=132.5, wall=wall)
     assert row["t"] == 132.5
     assert row["wall"].startswith("2026-06-07T12:02:12")
     assert row["node_count"] == 2 and row["available_node_count"] == 1
     assert row["sandbox_count"] == 8
-    assert row["nodes"] == [{"id": "n1", "available": True, "running_count": 3}]
+    # Per-node rows carry capacity alongside the existing fields.
+    assert row["nodes"][0] == {
+        "id": "n1", "available": True, "running_count": 3,
+        "total_memory_mb": 64000, "available_memory_mb": 40000,
+        "total_cpu_cores": 32.0, "available_cpu_cores": 20.0,
+    }
+    # Cluster-level capacity is summed across nodes that report it.
+    assert row["total_memory_mb"] == 80000
+    assert row["available_memory_mb"] == 56000
+    assert row["total_cpu_cores"] == 40.0
+    assert row["available_cpu_cores"] == 28.0
+
+
+def test_util_row_without_capacity_omits_capacity_keys():
+    # Nodes may report no `capacity` (it's `omitempty` server-side) — degrade
+    # gracefully: keep the legacy fields, emit no capacity keys.
+    status = {
+        "node_count": 1, "available_node_count": 1, "unavailable_node_count": 0,
+        "sandbox_count": 2,
+        "nodes": [{"id": "n1", "available": True, "running_count": 2}],
+    }
+    row = obs.util_row_from_status(status, t=1.0, wall=datetime.now(timezone.utc))
+    assert row["nodes"] == [{"id": "n1", "available": True, "running_count": 2}]
+    assert "total_memory_mb" not in row and "total_cpu_cores" not in row
 
 
 def test_util_row_handles_empty_nodes():
-    status = types.SimpleNamespace(
-        node_count=0, available_node_count=0, unavailable_node_count=0,
-        sandbox_count=0, nodes=(),
-    )
+    status = {
+        "node_count": 0, "available_node_count": 0, "unavailable_node_count": 0,
+        "sandbox_count": 0, "nodes": [],
+    }
     row = obs.util_row_from_status(status, t=0.0, wall=datetime.now(timezone.utc))
     assert row["nodes"] == [] and row["sandbox_count"] == 0
+    assert "total_memory_mb" not in row
 
 
 def test_summarize_phases_and_agent_and_util():
@@ -110,6 +143,33 @@ def test_summarize_phases_and_agent_and_util():
     u = s["utilization"]
     assert u["sandbox_peak"] == 10 and u["sandbox_mean"] == 7.5
     assert u["node_count"] == 12 and u["polls"] == 2
+
+
+def test_summarize_includes_memory_and_cpu_capacity():
+    util_rows = [
+        {"sandbox_count": 5, "node_count": 1, "available_node_count": 1,
+         "total_memory_mb": 64000, "available_memory_mb": 40000,
+         "total_cpu_cores": 32.0, "available_cpu_cores": 20.0},
+        {"sandbox_count": 7, "node_count": 1, "available_node_count": 1,
+         "total_memory_mb": 64000, "available_memory_mb": 30000,
+         "total_cpu_cores": 32.0, "available_cpu_cores": 12.0},
+    ]
+    u = obs.summarize([], util_rows)["utilization"]
+    assert u["mem_total_mb"] == 64000
+    assert u["mem_available_min_mb"] == 30000      # peak memory pressure
+    assert u["mem_available_mean_mb"] == 35000
+    assert u["cpu_total_cores"] == 32.0
+    assert u["cpu_available_min"] == 12.0          # peak cpu pressure
+    assert u["cpu_available_mean"] == 16.0
+    # format_summary surfaces a memory/cpu line when capacity was sampled.
+    text = obs.format_summary(obs.summarize([], util_rows))
+    assert "mem" in text.lower() and "cpu" in text.lower()
+
+
+def test_summarize_capacity_absent_is_none():
+    # No capacity sampled (older server / no heartbeat capacity) → None, no crash.
+    u = obs.summarize([], [{"sandbox_count": 1, "node_count": 1}])["utilization"]
+    assert u["mem_total_mb"] is None and u["cpu_total_cores"] is None
 
 
 def test_summarize_empty_is_safe():

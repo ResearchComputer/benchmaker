@@ -73,6 +73,12 @@ PI_AGENT_DIR = "/tmp/pi-agent"
 # alongside it under pi_ext/.
 _EXT_DIR = Path(__file__).resolve().parent / "pi_ext"
 REMOTE_EXEC_EXT = _EXT_DIR / "remote_exec.js"
+# Turn-cap extension (reads PI_MAX_TURNS, aborts the agent loop at the cap).
+MAX_TURNS_EXT = _EXT_DIR / "max_turns.js"
+# In container mode we stage it OUTSIDE PI_CODING_AGENT_DIR and load it with an
+# explicit ``--extension`` flag, so it can never also be auto-discovered (which
+# would double-count turns). Host mode loads it via the extensions dir instead.
+MAX_TURNS_STAGE_PATH = "/tmp/pi_max_turns.js"
 
 # Default Node install for a per-instance SWE-bench image (Debian-based Python,
 # no Node). Uses the official static tarball (.tar.gz → no xz dependency) so we
@@ -206,6 +212,19 @@ def pi_command(
     return f'{quoted} "$(cat {shlex.quote(prompt_path)})"'
 
 
+def pi_extension_args(ext_path: Optional[str], max_turns: int) -> list[str]:
+    """``--extension`` args to load the turn-cap extension, or ``[]`` if uncapped.
+
+    Only emitted when ``max_turns > 0`` and a staged path is given; otherwise pi
+    runs with no turn cap (its default).
+    """
+    try:
+        capped = ext_path and int(max_turns) > 0
+    except (TypeError, ValueError):
+        capped = False
+    return ["--extension", ext_path] if capped else []
+
+
 def build_prompt(item: dict[str, Any], *, workdir: str = WORKDIR) -> str:
     return SWEBENCH_PROMPT_TEMPLATE.format(
         workdir=workdir,
@@ -242,6 +261,7 @@ class _PiAgentBase(BaseAgent):
         max_tokens: int = 8192,
         total_wall_s: float = 2400.0,
         pi_extra_args: Optional[list[str]] = None,
+        pi_max_turns: Any = 0,
         **kwargs: Any,
     ):
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
@@ -255,6 +275,12 @@ class _PiAgentBase(BaseAgent):
         if isinstance(pi_extra_args, str):
             pi_extra_args = shlex.split(pi_extra_args)
         self._pi_extra_args = list(pi_extra_args or [])
+        # Cap on pi's agentic turns (0 = uncapped). May arrive as a string via
+        # --agent-kwarg; coerce defensively (bad values disable the cap).
+        try:
+            self._pi_max_turns = int(pi_max_turns or 0)
+        except (TypeError, ValueError):
+            self._pi_max_turns = 0
 
     def version(self) -> str:
         return "0.1.0"
@@ -309,18 +335,31 @@ class PiContainerAgent(_PiAgentBase):
         # Stage config + prompt inside the environment. models.json goes in the
         # explicit PI_AGENT_DIR (see its docstring) so pi finds it regardless of
         # how $HOME resolves in the exec.
-        setup_cmd = " && ".join([
+        stage = [
             _b64_write(f"{PI_AGENT_DIR}/models.json", cfg),
             _b64_write("/tmp/pi_task.txt", prompt),
-        ])
+        ]
+        # Stage the turn-cap extension only when capping; load it explicitly
+        # (see MAX_TURNS_STAGE_PATH) so it is never auto-discovered as well.
+        ext_path = None
+        if self._pi_max_turns > 0 and MAX_TURNS_EXT.exists():
+            ext_path = MAX_TURNS_STAGE_PATH
+            stage.append(_b64_write(ext_path, MAX_TURNS_EXT.read_text()))
+        setup_cmd = " && ".join(stage)
         await environment.exec(command=f"bash -lc {shlex.quote(setup_cmd)}", timeout_sec=120)
 
-        run_cmd = (
-            f"{_PATH_PREFIX} && cd {shlex.quote(self._cwd)} && "
+        env_prefix = (
             f"PI_CODING_AGENT_DIR={shlex.quote(PI_AGENT_DIR)} "
             f"OPENAI_API_KEY={shlex.quote(api_key)} "
+        )
+        if self._pi_max_turns > 0:
+            env_prefix += f"PI_MAX_TURNS={self._pi_max_turns} "
+        run_cmd = (
+            f"{_PATH_PREFIX} && cd {shlex.quote(self._cwd)} && "
+            + env_prefix
             + pi_command(model, "/tmp/pi_task.txt", provider=self._provider,
-                         extra_args=self._pi_extra_args)
+                         extra_args=pi_extension_args(ext_path, self._pi_max_turns)
+                         + self._pi_extra_args)
         )
         try:
             res = await environment.exec(
@@ -387,6 +426,8 @@ class PiHostAgent(_PiAgentBase):
                 "PI_EXEC_BRIDGE": bridge.url,
                 "PI_EXEC_CWD": self._cwd,
             }
+            if self._pi_max_turns > 0:
+                env["PI_MAX_TURNS"] = str(self._pi_max_turns)
             proc = await asyncio.create_subprocess_shell(
                 cmd, cwd=str(home), env=env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
@@ -423,6 +464,10 @@ class PiHostAgent(_PiAgentBase):
         if REMOTE_EXEC_EXT.exists():
             (agent_dir / "extensions" / "remote_exec.js").write_text(
                 REMOTE_EXEC_EXT.read_text())
+        # Auto-loaded turn-cap extension (no-op unless PI_MAX_TURNS is set in env).
+        if self._pi_max_turns > 0 and MAX_TURNS_EXT.exists():
+            (agent_dir / "extensions" / "max_turns.js").write_text(
+                MAX_TURNS_EXT.read_text())
 
     def _write_log(self, tag: str, text: str) -> None:
         try:

@@ -70,27 +70,61 @@ def phase_spans_from_result(result: Any) -> list[dict]:
     return spans
 
 
-def util_row_from_status(status: Any, t: float, wall: datetime) -> dict:
-    """One ``utilization.jsonl`` row from a flash-sandbox ``ClusterStatus``.
+def util_row_from_status(status: dict, t: float, wall: datetime) -> dict:
+    """One ``utilization.jsonl`` row from a raw flash-sandbox ``GET /status`` payload.
 
-    ``t`` is seconds since the poller started; ``wall`` is the UTC timestamp.
+    ``status`` is the parsed JSON dict from ``/status`` — *not* the typed
+    ``ClusterStatus``: that wrapper drops each node's ``capacity`` block, so the
+    poller hands us the raw dict to surface memory/CPU here. Per-node ``capacity``
+    (``total_memory_mb`` / ``available_memory_mb`` / ``total_cpu_cores`` /
+    ``available_cpu_cores``) is flattened into each node row and summed into
+    cluster-level totals; it is ``omitempty`` server-side, so nodes without it
+    simply contribute nothing and the capacity keys are omitted entirely when no
+    node reports them. ``t`` is seconds since the poller started; ``wall`` is the
+    UTC timestamp.
     """
     nodes = []
-    for n in getattr(status, "nodes", ()) or ():
-        nodes.append({
-            "id": getattr(n, "node_id", "") or "",
-            "available": bool(getattr(n, "available", False)),
-            "running_count": int(getattr(n, "running_count", 0) or 0),
-        })
-    return {
+    have_cap = False
+    tot_mem = avail_mem = 0          # MB, summed across reporting nodes
+    tot_cpu = avail_cpu = 0.0        # cores
+    for n in status.get("nodes") or ():
+        nrow = {
+            "id": n.get("id", "") or "",
+            "available": bool(n.get("available", False)),
+            "running_count": int(n.get("running_count", 0) or 0),
+        }
+        cap = n.get("capacity")
+        if isinstance(cap, dict):
+            have_cap = True
+            tm = int(cap.get("total_memory_mb", 0) or 0)
+            am = int(cap.get("available_memory_mb", 0) or 0)
+            tc = float(cap.get("total_cpu_cores", 0) or 0)
+            ac = float(cap.get("available_cpu_cores", 0) or 0)
+            nrow.update(
+                total_memory_mb=tm, available_memory_mb=am,
+                total_cpu_cores=tc, available_cpu_cores=ac,
+            )
+            tot_mem += tm
+            avail_mem += am
+            tot_cpu += tc
+            avail_cpu += ac
+        nodes.append(nrow)
+
+    row = {
         "t": round(float(t), 3),
         "wall": wall.isoformat(),
-        "node_count": int(getattr(status, "node_count", 0) or 0),
-        "available_node_count": int(getattr(status, "available_node_count", 0) or 0),
-        "unavailable_node_count": int(getattr(status, "unavailable_node_count", 0) or 0),
-        "sandbox_count": int(getattr(status, "sandbox_count", 0) or 0),
+        "node_count": int(status.get("node_count", 0) or 0),
+        "available_node_count": int(status.get("available_node_count", 0) or 0),
+        "unavailable_node_count": int(status.get("unavailable_node_count", 0) or 0),
+        "sandbox_count": int(status.get("sandbox_count", 0) or 0),
         "nodes": nodes,
     }
+    if have_cap:
+        row["total_memory_mb"] = tot_mem
+        row["available_memory_mb"] = avail_mem
+        row["total_cpu_cores"] = round(tot_cpu, 3)
+        row["available_cpu_cores"] = round(avail_cpu, 3)
+    return row
 
 
 def _percentile(values: list[float], q: float) -> Optional[float]:
@@ -139,6 +173,11 @@ def summarize(spans: list[dict], util_rows: list[dict]) -> dict:
     sandbox_counts = [int(r.get("sandbox_count", 0) or 0) for r in util_rows]
     node_counts = [int(r.get("node_count", 0) or 0) for r in util_rows]
     avail = [float(r.get("available_node_count", 0) or 0) for r in util_rows]
+    # Memory/CPU capacity (only present once a node reports a `capacity` block).
+    mem_total = [float(r["total_memory_mb"]) for r in util_rows if r.get("total_memory_mb") is not None]
+    mem_avail = [float(r["available_memory_mb"]) for r in util_rows if r.get("available_memory_mb") is not None]
+    cpu_total = [float(r["total_cpu_cores"]) for r in util_rows if r.get("total_cpu_cores") is not None]
+    cpu_avail = [float(r["available_cpu_cores"]) for r in util_rows if r.get("available_cpu_cores") is not None]
     return {
         "phases": phases,
         "agent": {
@@ -155,6 +194,13 @@ def summarize(spans: list[dict], util_rows: list[dict]) -> dict:
             "sandbox_mean": _mean([float(c) for c in sandbox_counts]),
             "node_count": max(node_counts) if node_counts else None,
             "available_mean": _mean(avail),
+            # `*_min` available = peak resource pressure across the run.
+            "mem_total_mb": max(mem_total) if mem_total else None,
+            "mem_available_min_mb": min(mem_avail) if mem_avail else None,
+            "mem_available_mean_mb": _mean(mem_avail),
+            "cpu_total_cores": max(cpu_total) if cpu_total else None,
+            "cpu_available_min": min(cpu_avail) if cpu_avail else None,
+            "cpu_available_mean": _mean(cpu_avail),
         },
     }
 
@@ -185,6 +231,13 @@ def format_summary(summary: dict) -> str:
             f"{_fmt(u['sandbox_mean'])} / {u['node_count']} nodes "
             f"(mean avail {_fmt(u['available_mean'])}); {u['polls']} polls"
         )
+        if u.get("mem_total_mb") is not None or u.get("cpu_total_cores") is not None:
+            lines.append(
+                f"mem: {_fmt(u['mem_available_min_mb'])}/{_fmt(u['mem_total_mb'])} MB "
+                f"min avail (mean {_fmt(u['mem_available_mean_mb'])}); "
+                f"cpu: {_fmt(u['cpu_available_min'])}/{_fmt(u['cpu_total_cores'])} cores "
+                f"min avail (mean {_fmt(u['cpu_available_mean'])})"
+            )
     return "\n".join(lines)
 
 
@@ -455,7 +508,10 @@ class JobObserver:
         warned = False
         while True:
             try:
-                status = await self._client.cluster_status()
+                # Read the raw /status dict, not the typed cluster_status(): the
+                # ClusterStatus/ClusterNode wrapper drops per-node `capacity`,
+                # which is exactly the memory/CPU data we want to record.
+                status = await self._client._get("status")
                 self._util_rows.append(util_row_from_status(
                     status, time.monotonic() - self._t0, datetime.now(timezone.utc)))
                 fails = 0

@@ -7,7 +7,7 @@ name = "benchmaker"
 version = "0.1.0"
 description = "Async HTTP benchmarking utility with pluggable workloads and load models."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [{ name = "Xiaozhe Yao" }]
 license = { text = "MIT" }
 dependencies = [
@@ -23,13 +23,18 @@ dependencies = [
     # `harbor` requirement would risk pulling an unrelated PyPI project, so we
     # pin the local checkout directly. Adjust the path for your environment, or
     # install it editable yourself: `pip install -e <path-to>/research/harbor`.
-    "harbor @ file:///pub/scratch/xiayao/research/harbor",
+    "harbor @ file:///home/xiayao/Documents/projects/researchcomputer/harbor",
 ]
 
 [project.optional-dependencies]
 rich = ["rich>=13"]
 hf = ["datasets>=2.18"]
 dev = ["pytest>=7", "pytest-asyncio>=0.23"]
+plot = [
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.9",
+    "seaborn>=0.13.2",
+]
 
 [project.scripts]
 benchmaker = "benchmaker.cli:main"

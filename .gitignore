@@ -16,3 +16,8 @@ runs/
 .local/
 jobs/
 results/
+docs/logs/
+docs/superpowers/
+logs/
+.pista/
+.claude/
