@@ -12,6 +12,7 @@ from benchmaker.workloads.sandbox import SandboxWorkloadType
     [
         ({"duration": 0.25}, 0.25),
         ({"Duration": 250_000_000}, 0.25),
+        ({"Duration": "250000000"}, 0.25),
     ],
 )
 async def test_sandbox_make_sample_accepts_duration_formats(duration_payload, expected_s):

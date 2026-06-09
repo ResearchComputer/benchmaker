@@ -83,6 +83,7 @@ _DEFAULT_SPEC: dict[str, Any] = {
     "image": "alpine:3.20",
     "command": ["sh", "-c", "sleep 3600"],
 }
+_NANOS_PER_SECOND = 1_000_000_000
 
 
 class SandboxWorkloadType(WorkloadType):
@@ -471,6 +472,9 @@ def _parse_server_duration_s(obj: dict[str, Any]) -> Optional[float]:
         except (TypeError, ValueError):
             pass
     dur_ns = obj.get("Duration")
-    if isinstance(dur_ns, (int, float)):
-        return float(dur_ns) / 1e9
+    if dur_ns is not None:
+        try:
+            return float(dur_ns) / _NANOS_PER_SECOND
+        except (TypeError, ValueError):
+            pass
     return None
