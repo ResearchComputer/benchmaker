@@ -119,13 +119,13 @@ tokens received"`).
 ### `SandboxWorkloadType`
 
 Drives the [Flash Sandbox](https://github.com/swiss-ai/flash-sandbox) HTTP API.
-Two operation modes; each one maps to a single HTTP request per benchmark
-ticket (so it composes with all the existing load models / monitors).
+Operation modes map to benchmark tickets so they compose with all the existing
+load models / monitors.
 
 ```python
 SandboxWorkloadType(
     base_url="http://localhost:8080",
-    operation="exec",                 # "exec" (default), "create", or "lifecycle"
+    operation="exec",                 # "exec" (default), "create", "lifecycle", or "file"
     spec={                            # body for the lazy POST /sandboxes
         "type": "kubernetes",
         "image": "alpine:3.20",
@@ -138,6 +138,10 @@ SandboxWorkloadType(
     sandbox_id=None,                  # if set, skips create/delete entirely
     persistent=False,                 # True → use /pshell instead of /exec
     default_command=None,             # used when items are None
+    file_path="/tmp/benchmaker.bin",  # file mode write/read path
+    file_content=b"benchmaker",       # default bytes for file mode
+    file_verify_with_exec=False,      # optional extra exec verifier (cat)
+    file_verify_command=None,         # override verifier command
     cleanup_on_close=True,
 )
 ```
@@ -161,6 +165,11 @@ exec failures and teardown flakes don't get confused. `sandbox_id=` is
 forbidden in lifecycle mode (the workload-type always allocates its own).
 Items are interpreted the same way as in `exec` mode.
 
+**`file` mode**. Each ticket writes bytes with `PUT /sandboxes/{id}/files`
+(`path` query param), reads them back with `GET .../files`, and compares bytes
+exactly (binary-safe). Optional exec verification can run an extra command
+(default `cat <path>`) and compare that output too.
+
 **Item interpretation (`exec` mode):**
 
 | Item type        | Behavior                                                       |
@@ -181,6 +190,14 @@ on the workload-type to use `/pshell` for *every* request.
 | `None`           | Use the configured `spec` verbatim                             |
 | `dict`           | Merged into the spec (e.g. to vary `image` or `memory_mb`)    |
 
+**Item interpretation (`file` mode):**
+
+| Item type        | Behavior                                                       |
+| ---------------- | -------------------------------------------------------------- |
+| `None`           | Write configured `file_content` to `file_path`                |
+| `bytes` / `str`  | Write item bytes (UTF-8 for `str`) to `file_path`             |
+| `dict`           | `{"path", "content" or "content_base64", "verify_exec", "verify_command"}` |
+
 **Extra metrics captured per request** (in `Sample.extra`):
 
 - `exit_code`           — exit code; a non-zero value flips `ok=False`
@@ -189,6 +206,9 @@ on the workload-type to use `/pshell` for *every* request.
 - `stderr_bytes`        — length of stderr in the response body
 - `server_created`      — `1.0` per successful create (`create` mode only)
 - `create_s` / `exec_s` / `delete_s` / `lifecycle_s` (`lifecycle` mode only)
+- `file_write_s` / `file_read_s` / `file_write_bytes` / `file_read_bytes` (`file` mode only)
+- `file_mismatch_count` / `file_mismatch_bytes` (`file` mode only)
+- `file_exec_s` / `file_exec_mismatch_count` / `file_exec_mismatch_bytes` (`file` + exec verify)
 
 In `create` and `lifecycle` modes, the response's `id` field is stored in
 `Sample.meta["sandbox_id"]`. In `lifecycle` mode, a non-blocking delete failure

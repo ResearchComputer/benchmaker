@@ -18,13 +18,14 @@ class SandboxRecipe(Recipe):
     name = "sandbox"
     help = ("Benchmark a Flash Sandbox endpoint. operation=exec reuses one "
             "sandbox per run; create makes a fresh pod per request; lifecycle "
-            "times the full create -> exec -> delete sequence per request.")
+            "times the full create -> exec -> delete sequence per request; "
+            "file does PUT/GET /files write/read-back verification.")
 
     def options(self) -> list:
         return [
             click.option("--base-url", "base_url", required=True,
                          help="Flash Sandbox base URL (e.g. http://localhost:8080)."),
-            click.option("--operation", type=click.Choice(["exec", "create", "lifecycle"]),
+            click.option("--operation", type=click.Choice(["exec", "create", "lifecycle", "file"]),
                          default="exec", show_default=True),
             click.option("--command", "-c", "command", multiple=True,
                          help="Command to exec (repeatable -> one item each). "

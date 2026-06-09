@@ -85,6 +85,7 @@ _sandbox_state: dict[str, Any] = {
     "created": [],      # list of (sid, body)
     "deleted": [],      # list of sid
     "exec_calls": [],   # list of (sid, body, endpoint)
+    "files": {},        # sid -> {path: bytes}
 }
 
 
@@ -109,6 +110,21 @@ async def _sb_exec(request: web.Request) -> web.Response:
         return web.json_response({
             "stdout": "", "stderr": "boom\n", "exit_code": 1, "duration": 0.001,
         })
+    if (
+        isinstance(cmd, list)
+        and len(cmd) >= 3
+        and cmd[0:2] == ["sh", "-c"]
+        and isinstance(cmd[2], str)
+        and cmd[2].startswith("cat ")
+    ):
+        path = cmd[2][4:].strip().strip("'\"")
+        data = _sandbox_state["files"].get(sid, {}).get(path, b"")
+        return web.json_response({
+            "stdout": data.decode("latin-1"),
+            "stderr": "",
+            "exit_code": 0,
+            "duration": 0.002,
+        })
     return web.json_response({
         "stdout": "hello\n", "stderr": "", "exit_code": 0, "duration": 0.002,
     })
@@ -129,6 +145,24 @@ async def _sb_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def _sb_put_file(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    path = request.query.get("path") or "/tmp/benchmaker.bin"
+    data = await request.read()
+    files = _sandbox_state["files"].setdefault(sid, {})
+    files[path] = data
+    return web.json_response({"ok": True, "bytes": len(data)})
+
+
+async def _sb_get_file(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    path = request.query.get("path") or "/tmp/benchmaker.bin"
+    data = _sandbox_state["files"].get(sid, {}).get(path, b"")
+    if path.endswith(".corrupt"):
+        data = data + b"!"
+    return web.Response(body=data, content_type="application/octet-stream")
+
+
 @pytest_asyncio.fixture
 async def sandbox_state():
     """Reset and yield the stub sandbox state recorder."""
@@ -136,6 +170,7 @@ async def sandbox_state():
     _sandbox_state["created"].clear()
     _sandbox_state["deleted"].clear()
     _sandbox_state["exec_calls"].clear()
+    _sandbox_state["files"].clear()
     yield _sandbox_state
 
 
@@ -154,12 +189,15 @@ async def stub_server() -> AsyncIterator[str]:
         app.router.add_post(prefix, _sb_create)
         app.router.add_post(prefix + "/{sid}/exec", _sb_exec)
         app.router.add_post(prefix + "/{sid}/pshell", _sb_pshell)
+        app.router.add_put(prefix + "/{sid}/files", _sb_put_file)
+        app.router.add_get(prefix + "/{sid}/files", _sb_get_file)
         app.router.add_delete(prefix + "/{sid}", _sb_delete)
     _metrics_counter["n"] = 0  # reset between tests
     _sandbox_state["next_id"] = 0
     _sandbox_state["created"].clear()
     _sandbox_state["deleted"].clear()
     _sandbox_state["exec_calls"].clear()
+    _sandbox_state["files"].clear()
 
     runner = web.AppRunner(app)
     await runner.setup()

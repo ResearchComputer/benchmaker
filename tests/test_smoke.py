@@ -519,6 +519,50 @@ async def test_sandbox_node_prefix(stub_server: str, sandbox_state):
     assert len(sandbox_state["created"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_sandbox_file_mode_put_get_verifies_binary_content(stub_server: str, sandbox_state):
+    wt = SandboxWorkloadType(
+        base_url=stub_server,
+        operation="file",
+        file_path="/tmp/blob.bin",
+    )
+    runner = BenchRunner(BenchConfig(
+        workload_type=wt,
+        workload=StaticWorkload(items=[b"\x00\x01abc", {"content_base64": "/wA=", "path": "/tmp/raw.bin"}]),
+        load=ConstantRPS(rps=5, duration_s=0.3),
+        progress_every_s=0,
+    ))
+    result = await runner.run()
+    assert result.summary["success"] == result.summary["total_requests"]
+    wm = result.summary["workload_metrics"]
+    assert wm["file_mismatch_count"]["mean"] == 0.0
+    assert wm["file_write_bytes"]["mean"] > 0.0
+    assert wm["file_read_bytes"]["mean"] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_sandbox_file_mode_records_mismatch_and_optional_exec_verify(
+    stub_server: str, sandbox_state
+):
+    wt = SandboxWorkloadType(
+        base_url=stub_server,
+        operation="file",
+        file_verify_with_exec=True,
+    )
+    runner = BenchRunner(BenchConfig(
+        workload_type=wt,
+        workload=StaticWorkload(items=[{"path": "/tmp/bad.corrupt", "content": "hello"}]),
+        load=ConstantRPS(rps=5, duration_s=0.3),
+        progress_every_s=0,
+    ))
+    result = await runner.run()
+    assert result.summary["failed"] == result.summary["total_requests"]
+    assert all(s.extra.get("file_mismatch_count") == 1.0 for s in result.samples)
+    assert all("mismatch" in (s.error or "") for s in result.samples)
+    assert sandbox_state["exec_calls"]
+    assert all("cat /tmp/bad.corrupt" in " ".join(b["command"]) for _sid, b, _ep in sandbox_state["exec_calls"])
+
+
 def test_sandbox_yaml_build():
     from benchmaker.config import build_config
     cfg = build_config({
