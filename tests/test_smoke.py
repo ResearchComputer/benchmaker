@@ -541,7 +541,7 @@ async def test_sandbox_file_mode_put_get_verifies_binary_content(stub_server: st
 
 
 @pytest.mark.asyncio
-async def test_sandbox_file_mode_records_mismatch_and_optional_exec_verify(
+async def test_sandbox_file_mode_detects_corruption_and_runs_optional_exec_verify(
     stub_server: str, sandbox_state
 ):
     wt = SandboxWorkloadType(

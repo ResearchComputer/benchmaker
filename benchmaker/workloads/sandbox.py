@@ -583,7 +583,8 @@ class SandboxWorkloadType(WorkloadType):
                 if ec is not None and ec != 0 and sample.error is None:
                     sample.error = f"file verify exec exit_code={ec}"
 
-        sample.request_ok = put_resp.ok and get_resp.ok and (exec_resp.ok if exec_resp is not None else True)
+        exec_ok = exec_resp is None or exec_resp.ok
+        sample.request_ok = put_resp.ok and get_resp.ok and exec_ok
         sample.latency_s = time.monotonic() - ctx.start_mono
         sample.ok = sample.error is None and read_mismatch == 0 and exec_mismatch == 0
         return await self._run_post_hooks(ctx, last_req, last_resp, sample)
@@ -697,6 +698,11 @@ def _count_mismatched_bytes(expected: bytes, got: bytes) -> int:
 
 
 def _extract_stdout_bytes(exec_obj: Any) -> Optional[bytes]:
+    """Best-effort bytes view of exec stdout for verifier comparisons.
+
+    Prefer latin-1 to preserve single-byte round-trips from test stubs; if the
+    text contains code points outside latin-1, fall back to UTF-8 bytes.
+    """
     if not isinstance(exec_obj, dict):
         return None
     out = exec_obj.get("stdout")
