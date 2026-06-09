@@ -254,12 +254,9 @@ class SandboxWorkloadType(WorkloadType):
                             sample.error = sample.error or f"exit_code={ec_i}"
                     except (TypeError, ValueError):
                         pass
-                dur = obj.get("duration")
-                if dur is not None:
-                    try:
-                        sample.extra["server_duration_s"] = float(dur)
-                    except (TypeError, ValueError):
-                        pass
+                dur_s = _parse_server_duration_s(obj)
+                if dur_s is not None:
+                    sample.extra["server_duration_s"] = dur_s
                 if isinstance(obj.get("stdout"), str):
                     sample.extra["stdout_bytes"] = float(len(obj["stdout"]))
                 if isinstance(obj.get("stderr"), str):
@@ -340,12 +337,9 @@ class SandboxWorkloadType(WorkloadType):
                     sample.extra["exit_code"] = float(exit_code)
                 except (TypeError, ValueError):
                     pass
-            dur = exec_obj.get("duration")
-            if dur is not None:
-                try:
-                    sample.extra["server_duration_s"] = float(dur)
-                except (TypeError, ValueError):
-                    pass
+            dur_s = _parse_server_duration_s(exec_obj)
+            if dur_s is not None:
+                sample.extra["server_duration_s"] = dur_s
             if isinstance(exec_obj.get("stdout"), str):
                 sample.extra["stdout_bytes"] = float(len(exec_obj["stdout"]))
             if isinstance(exec_obj.get("stderr"), str):
@@ -467,3 +461,16 @@ def _try_json(body: bytes) -> Any:
         return json.loads(body)
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def _parse_server_duration_s(obj: dict[str, Any]) -> Optional[float]:
+    dur = obj.get("duration")
+    if dur is not None:
+        try:
+            return float(dur)
+        except (TypeError, ValueError):
+            pass
+    dur_ns = obj.get("Duration")
+    if isinstance(dur_ns, (int, float)):
+        return float(dur_ns) / 1e9
+    return None
