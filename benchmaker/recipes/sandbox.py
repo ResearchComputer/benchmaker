@@ -1,4 +1,4 @@
-"""``sandbox`` recipe — benchmark a Flash Sandbox endpoint (exec/create/lifecycle)."""
+"""``sandbox`` recipe — benchmark a Flash Sandbox endpoint (exec/create/lifecycle/file)."""
 
 from __future__ import annotations
 
@@ -47,11 +47,27 @@ class SandboxRecipe(Recipe):
                               "(exec only)."),
             click.option("--header", "-H", "header", multiple=True,
                          help="Extra header 'Name: value'. Repeatable."),
+            # file-mode options
+            click.option("--file-path", "file_path", default=None,
+                         help="Path written then read back in file mode "
+                              "(default /tmp/benchmaker.bin)."),
+            click.option("--file-content", "file_content", default=None,
+                         help="UTF-8 text written in file mode (default "
+                              "'benchmaker'). For arbitrary bytes use a YAML "
+                              "config with a dict item carrying content_base64."),
+            click.option("--file-verify-with-exec/--no-file-verify-with-exec",
+                         "file_verify_with_exec", default=False, show_default=True,
+                         help="Also read the file back via an exec verifier "
+                              "(file mode)."),
+            click.option("--file-verify-command", "file_verify_command", default=None,
+                         help="Override the file-mode exec verifier "
+                              "(default: cat <path>)."),
         ]
 
     def build(self, shared: SharedOpts, *, base_url, operation, command, image,
               spec_json, endpoint_prefix, ttl_seconds, persistent, sandbox_id,
-              header) -> BuildResult:
+              header, file_path, file_content, file_verify_with_exec,
+              file_verify_command) -> BuildResult:
         spec: dict[str, Any] = {}
         if image:
             spec["image"] = image
@@ -74,6 +90,21 @@ class SandboxRecipe(Recipe):
         )
         if operation == "exec" and sandbox_id:
             wt_kwargs["sandbox_id"] = sandbox_id
+
+        # file-mode knobs: only forward when set, and only in file mode, so the
+        # other modes' constructor defaults are left untouched (passing
+        # file_path=None would otherwise stringify to "None").
+        file_kwargs: dict[str, Any] = {}
+        if operation == "file":
+            if file_path is not None:
+                file_kwargs["file_path"] = file_path
+            if file_content is not None:
+                file_kwargs["file_content"] = file_content
+            if file_verify_with_exec:
+                file_kwargs["file_verify_with_exec"] = True
+            if file_verify_command is not None:
+                file_kwargs["file_verify_command"] = file_verify_command
+            wt_kwargs.update(file_kwargs)
 
         # In exec mode with no explicit command, fall back to a default so a
         # None workload item is runnable.
@@ -108,6 +139,9 @@ class SandboxRecipe(Recipe):
             source_config["workload_type"]["sandbox_id"] = sandbox_id
         if default_command is not None:
             source_config["workload_type"]["default_command"] = default_command
+        # file_kwargs are all valid SandboxWorkloadType kwargs, so the emitted
+        # config round-trips back through build_config.
+        source_config["workload_type"].update(file_kwargs)
         if workload_spec is not None:
             source_config["workload"] = workload_spec
 

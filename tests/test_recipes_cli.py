@@ -63,6 +63,23 @@ async def _sb_exec(request: web.Request) -> web.Response:
                               "duration": 0.001})
 
 
+_cli_files: dict = {}
+
+
+async def _sb_put_file(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    path = request.query.get("path") or "/tmp/benchmaker.bin"
+    _cli_files[(sid, path)] = await request.read()
+    return web.json_response({"ok": True, "bytes": len(_cli_files[(sid, path)])})
+
+
+async def _sb_get_file(request: web.Request) -> web.Response:
+    sid = request.match_info["sid"]
+    path = request.query.get("path") or "/tmp/benchmaker.bin"
+    return web.Response(body=_cli_files.get((sid, path), b""),
+                        content_type="application/octet-stream")
+
+
 @pytest.fixture
 def live_server():
     """Run a stub aiohttp app in a background thread; yield its base URL."""
@@ -72,6 +89,8 @@ def live_server():
     for prefix in ("/sandboxes", "/native/sandboxes"):
         app.router.add_post(prefix, _sb_create)
         app.router.add_post(prefix + "/{sid}/exec", _sb_exec)
+        app.router.add_put(prefix + "/{sid}/files", _sb_put_file)
+        app.router.add_get(prefix + "/{sid}/files", _sb_get_file)
         app.router.add_delete(prefix + "/{sid}",
                               lambda r: web.json_response({"ok": True}))
 
@@ -158,6 +177,44 @@ def test_sandbox_recipe_runs(live_server):
         "--rate", "5", "--duration", "0.3s", "--quiet",
     ])
     assert res.exit_code == 0, res.output
+
+
+def test_sandbox_file_recipe_runs(live_server):
+    res = CliRunner().invoke(main, [
+        "sandbox", "--base-url", live_server, "--operation", "file",
+        "--file-path", "/tmp/cli-blob.bin", "--file-content", "hello-cli",
+        "--rate", "5", "--duration", "0.3s", "--quiet",
+    ])
+    assert res.exit_code == 0, res.output
+
+
+def test_sandbox_file_options_reach_workload():
+    """--file-* flags must be forwarded to the workload-type and recorded in
+    the reproducible source_config (and only in file mode)."""
+    from benchmaker.recipes import get
+    from benchmaker.recipes.base import SharedOpts
+
+    recipe = get("sandbox")
+    shared = SharedOpts(
+        rate="5", duration="0.3s", max_requests=None, timeout_s=30.0,
+        connection_limit=100, dotenv=None, quiet=True,
+        out_dir=None, run_id=None, labels=(), notes="",
+    )
+    built = recipe.build(
+        shared, base_url="http://x", operation="file", command=(),
+        image=None, spec_json=None, endpoint_prefix="/sandboxes",
+        ttl_seconds=None, persistent=False, sandbox_id=None, header=(),
+        file_path="/tmp/cli-blob.bin", file_content="hello-cli",
+        file_verify_with_exec=True, file_verify_command="md5sum /tmp/cli-blob.bin",
+    )
+    wt = built.workload_type
+    assert wt._file_path == "/tmp/cli-blob.bin"
+    assert wt._file_content == b"hello-cli"
+    assert wt._file_verify_with_exec is True
+    sc = built.source_config["workload_type"]
+    assert sc["file_path"] == "/tmp/cli-blob.bin"
+    assert sc["file_content"] == "hello-cli"
+    assert sc["file_verify_with_exec"] is True
 
 
 # ---------------------------------------------------------------- validation

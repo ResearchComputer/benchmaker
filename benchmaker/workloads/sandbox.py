@@ -53,8 +53,10 @@ Item interpretation (``file`` mode)
 - ``None``        → write ``file_content`` to ``file_path``
 - ``bytes``       → write bytes to ``file_path``
 - ``str``         → UTF-8 encode and write to ``file_path``
-- ``dict``        → ``{"path": "...", "content": <bytes|str>, "verify_exec": bool,
-  "verify_command": <str|list[str]>}``
+- ``dict``        → ``{"path": "...", "content": <bytes|str>,
+  "content_base64": "<b64>", "verify_exec": bool,
+  "verify_command": <str|list[str]>}``. Use ``content_base64`` instead of
+  ``content`` to carry arbitrary bytes through a text (e.g. YAML/JSON) config.
 
 Captured metrics
 ----------------
@@ -547,6 +549,12 @@ class SandboxWorkloadType(WorkloadType):
         exec_mismatch = 0
         exec_resp: Optional[Response] = None
         if verify_exec and get_resp.ok:
+            # Only the default `cat <path>` verifier is expected to echo the
+            # file content back, so only then do we compare stdout to it. A
+            # custom verify_command (e.g. a checksum) is graded on its exit
+            # code alone — comparing its output to the bytes would always
+            # register a spurious mismatch.
+            compare_stdout = verify_command is None
             command = verify_command or ["sh", "-c", f"cat {shlex.quote(path)}"]
             exec_req = self._make_exec_request(sid, {"command": command})
             exec_resp = await ctx.fire(exec_req)
@@ -564,16 +572,17 @@ class SandboxWorkloadType(WorkloadType):
                     )
             else:
                 exec_obj = _try_json(exec_resp.body)
-                stdout_bytes = _extract_stdout_bytes(exec_obj)
-                if stdout_bytes is not None:
-                    exec_mismatch = _count_mismatched_bytes(content, stdout_bytes)
-                    sample.extra["file_exec_mismatch_count"] = 1.0 if exec_mismatch else 0.0
-                    sample.extra["file_exec_mismatch_bytes"] = float(exec_mismatch)
-                    if exec_mismatch and sample.error is None:
-                        sample.error = (
-                            "file exec verify mismatch: "
-                            f"{exec_mismatch} mismatched bytes"
-                        )
+                if compare_stdout:
+                    stdout_bytes = _extract_stdout_bytes(exec_obj)
+                    if stdout_bytes is not None:
+                        exec_mismatch = _count_mismatched_bytes(content, stdout_bytes)
+                        sample.extra["file_exec_mismatch_count"] = 1.0 if exec_mismatch else 0.0
+                        sample.extra["file_exec_mismatch_bytes"] = float(exec_mismatch)
+                        if exec_mismatch and sample.error is None:
+                            sample.error = (
+                                "file exec verify mismatch: "
+                                f"{exec_mismatch} mismatched bytes"
+                            )
                 ec: Optional[int] = None
                 if isinstance(exec_obj, dict) and exec_obj.get("exit_code") is not None:
                     try:
@@ -691,6 +700,12 @@ def _coerce_file_content(content: Any) -> bytes:
 
 
 def _count_mismatched_bytes(expected: bytes, got: bytes) -> int:
+    # Fast path for the overwhelmingly common (no-corruption) case: a C-level
+    # bytes compare instead of an O(n) Python loop. This matters because the
+    # comparison runs per ticket and is charged to the sample latency, so for
+    # large file payloads the naive loop would skew the measured latency.
+    if expected == got:
+        return 0
     common = min(len(expected), len(got))
     mismatched = sum(1 for i in range(common) if expected[i] != got[i])
     mismatched += abs(len(expected) - len(got))
