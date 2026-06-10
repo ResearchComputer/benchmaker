@@ -578,6 +578,9 @@ async def test_sandbox_lifecycle_fires_create_exec_delete(stub_server: str, sand
         assert s.extra["delete_s"] >= 0.0
         assert s.extra["lifecycle_s"] >= s.extra["create_s"]  # total >= any leg
         assert s.extra["exit_code"] == 0.0
+        # exec-step metrics flow through the same parser as exec mode, incl. the
+        # capitalized nanosecond "Duration" wire format.
+        assert s.extra["server_duration_s"] > 0.0
         assert s.meta.get("sandbox_id", "").startswith("sb-test-")
 
 
