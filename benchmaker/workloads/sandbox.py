@@ -23,6 +23,12 @@ Operation modes
     are captured in ``Sample.extra`` (``create_s``, ``exec_s``, ``delete_s``)
     so you can disentangle startup vs. execution vs. teardown latency.
 
+``file``
+    Each ticket performs ``PUT .../files`` then ``GET .../files`` against a
+    shared sandbox and byte-compares the read-back content to what was written.
+    Optionally, run an extra ``exec`` verification command (defaults to
+    ``cat <path>``) and compare that output too.
+
 Item interpretation (``exec`` mode)
 -----------------------------------
 - ``None``        → run the configured ``default_command``
@@ -41,6 +47,16 @@ Item interpretation (``lifecycle`` mode)
 ----------------------------------------
 Same as ``exec`` mode (items name the command). The sandbox spec is taken from
 the workload-type configuration.
+
+Item interpretation (``file`` mode)
+-----------------------------------
+- ``None``        → write ``file_content`` to ``file_path``
+- ``bytes``       → write bytes to ``file_path``
+- ``str``         → UTF-8 encode and write to ``file_path``
+- ``dict``        → ``{"path": "...", "content": <bytes|str>,
+  "content_base64": "<b64>", "verify_exec": bool,
+  "verify_command": <str|list[str]>}``. Use ``content_base64`` instead of
+  ``content`` to carry arbitrary bytes through a text (e.g. YAML/JSON) config.
 
 Captured metrics
 ----------------
@@ -61,12 +77,25 @@ Captured metrics
     ``lifecycle_s``       wall time across all three steps
     plus the standard ``exec_code`` / ``server_duration_s`` / ``stdout_bytes`` /
     ``stderr_bytes`` from the exec step.
+
+``file``:
+    ``file_write_s``             wall time of ``PUT .../files``
+    ``file_read_s``              wall time of ``GET .../files``
+    ``file_write_bytes``         bytes written
+    ``file_read_bytes``          bytes read back
+    ``file_mismatch_count``      ``1.0`` when read-back differs, else ``0.0``
+    ``file_mismatch_bytes``      number of mismatched bytes (including length diff)
+    ``file_exec_s``              wall time of optional exec verifier
+    ``file_exec_mismatch_count`` ``1.0`` when exec output differs, else ``0.0``
+    ``file_exec_mismatch_bytes`` mismatched bytes for exec output
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import shlex
 import time
 from typing import Any, Optional
 
@@ -107,11 +136,16 @@ class SandboxWorkloadType(WorkloadType):
         headers: Optional[dict[str, str]] = None,
         cleanup_on_close: bool = True,
         name: str = "sandbox",
+        file_path: str = "/tmp/benchmaker.bin",
+        file_content: Any = b"benchmaker",
+        file_verify_with_exec: bool = False,
+        file_verify_command: Any = None,
     ):
         op = operation.lower()
-        if op not in ("exec", "create", "lifecycle"):
+        if op not in ("exec", "create", "lifecycle", "file"):
             raise ValueError(
-                f"operation must be 'exec', 'create', or 'lifecycle', got {operation!r}"
+                "operation must be 'exec', 'create', 'lifecycle', or 'file', "
+                f"got {operation!r}"
             )
         if op == "lifecycle" and sandbox_id is not None:
             raise ValueError(
@@ -133,6 +167,14 @@ class SandboxWorkloadType(WorkloadType):
         self._create_timeout_s = create_timeout_s
         self._ttl_seconds = ttl_seconds
         self._cleanup_on_close = cleanup_on_close
+        self._file_path = str(file_path)
+        self._file_content = _coerce_file_content(file_content)
+        self._file_verify_with_exec = bool(file_verify_with_exec)
+        self._file_verify_command = (
+            _coerce_command(file_verify_command)
+            if file_verify_command is not None
+            else None
+        )
 
         hdrs = dict(headers or {})
         hdrs.setdefault("Content-Type", "application/json")
@@ -150,13 +192,19 @@ class SandboxWorkloadType(WorkloadType):
             # Lifecycle's full flow lives in run_ticket; if anyone reaches
             # make_request directly, give them the first step (create).
             return self._make_create_request(None)
+        if self._operation == "file":
+            sid = await self._ensure_sandbox()
+            path, content, _verify_exec, _verify_cmd = self._parse_file_item(item)
+            return self._make_file_put_request(sid, path, content)
         sid = await self._ensure_sandbox()
         return self._make_exec_request(sid, item)
 
     async def run_ticket(self, ctx: TicketContext) -> Sample:
-        if self._operation != "lifecycle":
-            return await super().run_ticket(ctx)
-        return await self._run_lifecycle(ctx)
+        if self._operation == "lifecycle":
+            return await self._run_lifecycle(ctx)
+        if self._operation == "file":
+            return await self._run_file(ctx)
+        return await super().run_ticket(ctx)
 
     def _make_create_request(self, item: Any) -> Request:
         body = dict(self._spec)
@@ -232,6 +280,70 @@ class SandboxWorkloadType(WorkloadType):
                 "sandbox_id": sid,
                 "sandbox_operation": "pshell" if persistent else "exec",
                 "command": command,
+            },
+        )
+
+    def _parse_file_item(self, item: Any) -> tuple[str, bytes, bool, Optional[list[str]]]:
+        path = self._file_path
+        content = self._file_content
+        verify_exec = self._file_verify_with_exec
+        verify_command = self._file_verify_command
+
+        if item is None:
+            return path, content, verify_exec, verify_command
+        if isinstance(item, (bytes, bytearray)):
+            return path, bytes(item), verify_exec, verify_command
+        if isinstance(item, str):
+            return path, item.encode("utf-8"), verify_exec, verify_command
+        if not isinstance(item, dict):
+            raise TypeError(
+                "sandbox 'file' mode expects None|bytes|str|dict items, "
+                f"got {type(item).__name__}"
+            )
+
+        if "path" in item and item["path"] is not None:
+            path = str(item["path"])
+        if "content" in item:
+            content = _coerce_file_content(item["content"])
+        elif "content_base64" in item:
+            raw = item["content_base64"]
+            if not isinstance(raw, str):
+                raise TypeError("content_base64 must be a base64 string")
+            content = base64.b64decode(raw.encode("ascii"))
+        if "verify_exec" in item:
+            verify_exec = bool(item["verify_exec"])
+        if "verify_command" in item and item["verify_command"] is not None:
+            verify_command = _coerce_command(item["verify_command"])
+        return path, content, verify_exec, verify_command
+
+    def _make_file_put_request(self, sid: str, path: str, content: bytes) -> Request:
+        headers = dict(self._headers)
+        headers["Content-Type"] = "application/octet-stream"
+        return Request(
+            method="PUT",
+            url=f"{self._base_url}{self._prefix}/{sid}/files",
+            headers=headers,
+            params={"path": path},
+            body=content,
+            timeout_s=self._timeout_s,
+            meta={
+                "sandbox_id": sid,
+                "sandbox_operation": "file_put",
+                "file_path": path,
+            },
+        )
+
+    def _make_file_get_request(self, sid: str, path: str) -> Request:
+        return Request(
+            method="GET",
+            url=f"{self._base_url}{self._prefix}/{sid}/files",
+            headers=dict(self._headers),
+            params={"path": path},
+            timeout_s=self._timeout_s,
+            meta={
+                "sandbox_id": sid,
+                "sandbox_operation": "file_get",
+                "file_path": path,
             },
         )
 
@@ -346,6 +458,112 @@ class SandboxWorkloadType(WorkloadType):
 
         return await self._run_post_hooks(ctx, exec_req, exec_resp, sample)
 
+    async def _run_file(self, ctx: TicketContext) -> Sample:
+        sid = await self._ensure_sandbox()
+        path, content, verify_exec, verify_command = self._parse_file_item(ctx.item)
+
+        put_req = self._make_file_put_request(sid, path, content)
+        put_resp = await ctx.fire(put_req)
+
+        sample = Sample(
+            start_ts=ctx.start_mono,
+            latency_s=time.monotonic() - ctx.start_mono,
+            status=put_resp.status,
+            ok=False,
+            request_ok=put_resp.ok,
+            bytes_recv=len(put_resp.body or b""),
+            bytes_sent=_estimate_request_size(put_req),
+            error=None,
+            workload=self.name,
+            meta={
+                "sandbox_operation": "file",
+                "sandbox_id": sid,
+                "file_path": path,
+            },
+        )
+        sample.extra["file_write_s"] = put_resp.elapsed_s
+        sample.extra["file_write_bytes"] = float(len(content))
+        last_req: Request = put_req
+        last_resp: Response = put_resp
+
+        if not put_resp.ok:
+            sample.error = f"file put failed: {put_resp.error or f'HTTP {put_resp.status}'}"
+            sample.latency_s = time.monotonic() - ctx.start_mono
+            return await self._run_post_hooks(ctx, last_req, last_resp, sample)
+
+        get_req = self._make_file_get_request(sid, path)
+        get_resp = await ctx.fire(get_req)
+        last_req, last_resp = get_req, get_resp
+        sample.extra["file_read_s"] = get_resp.elapsed_s
+        sample.extra["file_read_bytes"] = float(len(get_resp.body or b""))
+        sample.bytes_sent += _estimate_request_size(get_req)
+        sample.bytes_recv += len(get_resp.body or b"")
+        sample.status = get_resp.status
+
+        read_mismatch = 0
+        if not get_resp.ok:
+            sample.error = f"file get failed: {get_resp.error or f'HTTP {get_resp.status}'}"
+        else:
+            read_mismatch = _count_mismatched_bytes(content, get_resp.body or b"")
+            sample.extra["file_mismatch_count"] = 1.0 if read_mismatch else 0.0
+            sample.extra["file_mismatch_bytes"] = float(read_mismatch)
+            if read_mismatch:
+                sample.error = (
+                    f"file content mismatch for {path!r}: {read_mismatch} mismatched bytes"
+                )
+
+        exec_mismatch = 0
+        exec_resp: Optional[Response] = None
+        if verify_exec and get_resp.ok:
+            # Only the default `cat <path>` verifier is expected to echo the
+            # file content back, so only then do we compare stdout to it. A
+            # custom verify_command (e.g. a checksum) is graded on its exit
+            # code alone — comparing its output to the bytes would always
+            # register a spurious mismatch.
+            compare_stdout = verify_command is None
+            command = verify_command or ["sh", "-c", f"cat {shlex.quote(path)}"]
+            exec_req = self._make_exec_request(sid, {"command": command})
+            exec_resp = await ctx.fire(exec_req)
+            last_req, last_resp = exec_req, exec_resp
+            sample.extra["file_exec_s"] = exec_resp.elapsed_s
+            sample.bytes_sent += _estimate_request_size(exec_req)
+            sample.bytes_recv += len(exec_resp.body or b"")
+            sample.status = exec_resp.status
+
+            if not exec_resp.ok:
+                if sample.error is None:
+                    sample.error = (
+                        f"file verify exec failed: "
+                        f"{exec_resp.error or f'HTTP {exec_resp.status}'}"
+                    )
+            else:
+                exec_obj = _try_json(exec_resp.body)
+                if compare_stdout:
+                    stdout_bytes = _extract_stdout_bytes(exec_obj)
+                    if stdout_bytes is not None:
+                        exec_mismatch = _count_mismatched_bytes(content, stdout_bytes)
+                        sample.extra["file_exec_mismatch_count"] = 1.0 if exec_mismatch else 0.0
+                        sample.extra["file_exec_mismatch_bytes"] = float(exec_mismatch)
+                        if exec_mismatch and sample.error is None:
+                            sample.error = (
+                                "file exec verify mismatch: "
+                                f"{exec_mismatch} mismatched bytes"
+                            )
+                ec: Optional[int] = None
+                if isinstance(exec_obj, dict) and exec_obj.get("exit_code") is not None:
+                    try:
+                        ec = int(exec_obj.get("exit_code"))
+                    except (TypeError, ValueError):
+                        ec = None
+                if ec is not None and ec != 0 and sample.error is None:
+                    sample.error = f"file verify exec exit_code={ec}"
+
+        exec_ok = exec_resp is None or exec_resp.ok
+        sample.request_ok = put_resp.ok and get_resp.ok and exec_ok
+        sample.latency_s = time.monotonic() - ctx.start_mono
+        sample.ok = sample.error is None and read_mismatch == 0 and exec_mismatch == 0
+        return await self._run_post_hooks(ctx, last_req, last_resp, sample)
+
     @staticmethod
     async def _run_post_hooks(ctx: TicketContext, req: Request, resp: Response,
                               sample: Sample) -> Sample:
@@ -433,6 +651,50 @@ def _try_json(body: bytes) -> Any:
         return json.loads(body)
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def _coerce_file_content(content: Any) -> bytes:
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, bytearray):
+        return bytes(content)
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    raise TypeError(
+        f"file content must be bytes|bytearray|str, got {type(content).__name__}"
+    )
+
+
+def _count_mismatched_bytes(expected: bytes, got: bytes) -> int:
+    # Fast path for the overwhelmingly common (no-corruption) case: a C-level
+    # bytes compare instead of an O(n) Python loop. This matters because the
+    # comparison runs per ticket and is charged to the sample latency, so for
+    # large file payloads the naive loop would skew the measured latency.
+    if expected == got:
+        return 0
+    common = min(len(expected), len(got))
+    mismatched = sum(1 for i in range(common) if expected[i] != got[i])
+    mismatched += abs(len(expected) - len(got))
+    return mismatched
+
+
+def _extract_stdout_bytes(exec_obj: Any) -> Optional[bytes]:
+    """Best-effort bytes view of exec stdout for verifier comparisons.
+
+    Prefer latin-1 to preserve single-byte round-trips from test stubs; if the
+    text contains code points outside latin-1, fall back to UTF-8 bytes.
+    """
+    if not isinstance(exec_obj, dict):
+        return None
+    out = exec_obj.get("stdout")
+    if isinstance(out, str):
+        try:
+            return out.encode("latin-1")
+        except UnicodeEncodeError:
+            return out.encode("utf-8")
+    if isinstance(out, bytes):
+        return out
+    return None
 
 
 def _parse_server_duration_s(obj: dict[str, Any]) -> Optional[float]:
