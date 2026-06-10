@@ -112,6 +112,7 @@ _DEFAULT_SPEC: dict[str, Any] = {
     "image": "alpine:3.20",
     "command": ["sh", "-c", "sleep 3600"],
 }
+_NANOS_PER_SECOND = 1_000_000_000
 
 
 class SandboxWorkloadType(WorkloadType):
@@ -355,27 +356,10 @@ class SandboxWorkloadType(WorkloadType):
 
         obj = _try_json(response.body)
         if op in ("exec", "pshell"):
-            if isinstance(obj, dict):
-                ec = obj.get("exit_code")
-                if ec is not None:
-                    try:
-                        ec_i = int(ec)
-                        sample.extra["exit_code"] = float(ec_i)
-                        if ec_i != 0:
-                            sample.ok = False
-                            sample.error = sample.error or f"exit_code={ec_i}"
-                    except (TypeError, ValueError):
-                        pass
-                dur = obj.get("duration")
-                if dur is not None:
-                    try:
-                        sample.extra["server_duration_s"] = float(dur)
-                    except (TypeError, ValueError):
-                        pass
-                if isinstance(obj.get("stdout"), str):
-                    sample.extra["stdout_bytes"] = float(len(obj["stdout"]))
-                if isinstance(obj.get("stderr"), str):
-                    sample.extra["stderr_bytes"] = float(len(obj["stderr"]))
+            exit_code = _apply_exec_metrics(sample, obj)
+            if exit_code is not None and exit_code != 0:
+                sample.ok = False
+                sample.error = sample.error or f"exit_code={exit_code}"
         elif op == "create":
             if isinstance(obj, dict) and "id" in obj:
                 sample.meta["sandbox_id"] = obj["id"]
@@ -442,26 +426,8 @@ class SandboxWorkloadType(WorkloadType):
         sample.bytes_sent += _estimate_request_size(exec_req)
         sample.status = exec_resp.status
 
-        exit_code: Optional[int] = None
         exec_obj = _try_json(exec_resp.body) if exec_resp.ok else None
-        if isinstance(exec_obj, dict):
-            ec = exec_obj.get("exit_code")
-            if ec is not None:
-                try:
-                    exit_code = int(ec)
-                    sample.extra["exit_code"] = float(exit_code)
-                except (TypeError, ValueError):
-                    pass
-            dur = exec_obj.get("duration")
-            if dur is not None:
-                try:
-                    sample.extra["server_duration_s"] = float(dur)
-                except (TypeError, ValueError):
-                    pass
-            if isinstance(exec_obj.get("stdout"), str):
-                sample.extra["stdout_bytes"] = float(len(exec_obj["stdout"]))
-            if isinstance(exec_obj.get("stderr"), str):
-                sample.extra["stderr_bytes"] = float(len(exec_obj["stderr"]))
+        exit_code = _apply_exec_metrics(sample, exec_obj)
 
         # Step 3: delete (best-effort; always attempted so the sandbox doesn't leak)
         delete_req = Request(
@@ -729,3 +695,48 @@ def _extract_stdout_bytes(exec_obj: Any) -> Optional[bytes]:
     if isinstance(out, bytes):
         return out
     return None
+
+
+def _parse_server_duration_s(obj: dict[str, Any]) -> Optional[float]:
+    dur = obj.get("duration")
+    if dur is not None:
+        try:
+            return float(dur)
+        except (TypeError, ValueError):
+            pass
+    dur_ns = obj.get("Duration")
+    if dur_ns is not None:
+        try:
+            return float(dur_ns) / _NANOS_PER_SECOND
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _apply_exec_metrics(sample: Sample, obj: Any) -> Optional[int]:
+    """Populate exec metrics from a flash-sandbox exec/pshell response body.
+
+    Sets ``exit_code`` / ``server_duration_s`` / ``stdout_bytes`` /
+    ``stderr_bytes`` in ``sample.extra``. Shared by ``make_sample`` (exec mode)
+    and ``_run_lifecycle`` so both report the same metrics from the same wire
+    formats. Returns the parsed integer exit code (``None`` if absent or
+    unparseable); the caller decides how to act on a non-zero code.
+    """
+    if not isinstance(obj, dict):
+        return None
+    exit_code: Optional[int] = None
+    ec = obj.get("exit_code")
+    if ec is not None:
+        try:
+            exit_code = int(ec)
+            sample.extra["exit_code"] = float(exit_code)
+        except (TypeError, ValueError):
+            exit_code = None
+    dur_s = _parse_server_duration_s(obj)
+    if dur_s is not None:
+        sample.extra["server_duration_s"] = dur_s
+    if isinstance(obj.get("stdout"), str):
+        sample.extra["stdout_bytes"] = float(len(obj["stdout"]))
+    if isinstance(obj.get("stderr"), str):
+        sample.extra["stderr_bytes"] = float(len(obj["stderr"]))
+    return exit_code

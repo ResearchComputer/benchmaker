@@ -106,9 +106,12 @@ async def _sb_exec(request: web.Request) -> web.Response:
     body = await request.json()
     _sandbox_state["exec_calls"].append((sid, body, "exec"))
     cmd = body.get("command") or []
+    # flash-sandbox serializes the exec result's `time.Duration` field with no
+    # JSON tag, so it goes over the wire as capitalized "Duration" in integer
+    # nanoseconds (not lowercase "duration" seconds). Mirror that here.
     if isinstance(cmd, list) and any("fail" in str(x) for x in cmd):
         return web.json_response({
-            "stdout": "", "stderr": "boom\n", "exit_code": 1, "duration": 0.001,
+            "stdout": "", "stderr": "boom\n", "exit_code": 1, "Duration": 1_000_000,
         })
     if (
         isinstance(cmd, list)
@@ -126,7 +129,7 @@ async def _sb_exec(request: web.Request) -> web.Response:
             "duration": 0.002,
         })
     return web.json_response({
-        "stdout": "hello\n", "stderr": "", "exit_code": 0, "duration": 0.002,
+        "stdout": "hello\n", "stderr": "", "exit_code": 0, "Duration": 2_000_000,
     })
 
 
@@ -135,7 +138,7 @@ async def _sb_pshell(request: web.Request) -> web.Response:
     body = await request.json()
     _sandbox_state["exec_calls"].append((sid, body, "pshell"))
     return web.json_response({
-        "stdout": "pshell-ok\n", "stderr": "", "exit_code": 0, "duration": 0.001,
+        "stdout": "pshell-ok\n", "stderr": "", "exit_code": 0, "Duration": 1_000_000,
     })
 
 
