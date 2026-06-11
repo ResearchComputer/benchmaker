@@ -109,3 +109,51 @@ def test_parse_pi_conversation_skips_malformed_turn_end():
 
 def _key_helper(text: str) -> str:
     return T._key_from_text(text)
+
+
+def _write_job(tmp_path, trial, log_text):
+    d = tmp_path / trial / "agent"
+    d.mkdir(parents=True)
+    (d / "pi-container.log").write_text(log_text)
+
+
+def test_convert_job_and_load_store(tmp_path):
+    log_a = _pi_log(
+        {"type": "message_start", "message": {"role": "user",
+         "content": "x\n# Task: aa__aa-1\n"}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "a0"}], "stopReason": "endTurn",
+         "model": "m", "usage": {"input": 1, "output": 1, "totalTokens": 2}}},
+    )
+    log_b = _pi_log(
+        {"type": "message_start", "message": {"role": "user",
+         "content": "y\n# Task: bb__bb-2\n"}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "toolCall", "id": "c1", "name": "bash",
+                      "arguments": {"command": "ls"}}], "stopReason": "toolUse",
+         "model": "m", "usage": {"input": 3, "output": 4, "totalTokens": 7}}},
+    )
+    _write_job(tmp_path, "aa__aa-1__x", log_a)
+    _write_job(tmp_path, "bb__bb-2__y", log_b)
+
+    out = tmp_path / "replay-trajectories.jsonl"
+    n = T.convert_job(tmp_path, out)
+    assert n == 2
+    lines = out.read_text().strip().splitlines()
+    assert len(lines) == 2
+
+    store = T.load_store(out)
+    assert set(store) == {"aa__aa-1", "bb__bb-2"}
+    assert store["aa__aa-1"].trial == "aa__aa-1__x"
+    assert store["bb__bb-2"].turns[0].tool_calls[0]["name"] == "bash"
+
+
+def test_load_store_last_wins_on_duplicate_key(tmp_path):
+    out = tmp_path / "t.jsonl"
+    a = T.Trajectory(key="k", instance_id="k", model="m",
+                     turns=[T.RecordedTurn(0, "first", None, [], "stop", {})])
+    b = T.Trajectory(key="k", instance_id="k", model="m",
+                     turns=[T.RecordedTurn(0, "second", None, [], "stop", {})])
+    out.write_text(json.dumps(a.to_dict()) + "\n" + json.dumps(b.to_dict()) + "\n")
+    store = T.load_store(out)
+    assert store["k"].turns[0].content == "second"

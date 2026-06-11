@@ -203,3 +203,67 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
         key=_key_from_text(text), instance_id=_instance_id_from_text(text),
         model=model or "", turns=turns,
     )
+
+
+def convert_job(job_dir: Any, out_path: Any) -> int:
+    """Convert every `<trial>/agent/pi-container.log` under `job_dir` into one
+    consolidated JSONL at `out_path` (one trajectory per line). Returns the
+    number of trajectories written; empty trajectories are skipped."""
+    job_dir = Path(job_dir)
+    out_path = Path(out_path)
+    logs = sorted(job_dir.glob("*/agent/pi-container.log"))
+    n = 0
+    with out_path.open("w") as fh:
+        for lp in logs:
+            trial = lp.parent.parent.name
+            try:
+                text = lp.read_text()
+            except Exception as e:  # pragma: no cover - fs failure
+                log.warning("could not read %s: %s", lp, e)
+                continue
+            traj = parse_pi_conversation(text)
+            traj.trial = trial
+            if not traj.turns:
+                log.warning("no turns parsed from %s; skipping", lp)
+                continue
+            fh.write(json.dumps(traj.to_dict(), default=str) + "\n")
+            n += 1
+    return n
+
+
+def load_store(path: Any) -> dict[str, Trajectory]:
+    """Load a consolidated trajectory JSONL into a `key -> Trajectory` map.
+    Duplicate keys: last line wins (logged)."""
+    store: dict[str, Trajectory] = {}
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            traj = Trajectory.from_dict(d)
+            if traj.key in store:
+                log.warning("duplicate trajectory key %r; last wins", traj.key)
+            store[traj.key] = traj
+    return store
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Convert a harbor SWE-bench job dir's pi logs into a "
+                    "consolidated replay-trajectories.jsonl.")
+    p.add_argument("job_dir", help="Job directory (contains <trial>/agent/pi-container.log).")
+    p.add_argument("-o", "--out", default="replay-trajectories.jsonl",
+                   help="Output JSONL path (default: replay-trajectories.jsonl).")
+    a = p.parse_args(argv)
+    n = convert_job(a.job_dir, a.out)
+    print(f"wrote {n} trajectories to {a.out}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
