@@ -124,7 +124,7 @@ def live_server():
 
 def test_registry_has_expected_recipes():
     names = {r.name for r in all_recipes()}
-    assert names == {"http", "llm", "sandbox", "swebench"}
+    assert names == {"http", "llm", "sandbox", "swebench", "swebench-replay"}
 
 
 def test_recipes_registered_as_subcommands():

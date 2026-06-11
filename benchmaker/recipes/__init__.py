@@ -33,7 +33,7 @@ def all_recipes() -> list[Recipe]:
 
 # Import the concrete recipe modules so they self-register. Kept at the bottom
 # to avoid a circular import (each module imports from this package).
-from benchmaker.recipes import http, llm, sandbox, swebench  # noqa: E402,F401
+from benchmaker.recipes import http, llm, sandbox, swebench, swebench_replay  # noqa: E402,F401
 
 __all__ = [
     "Recipe",
