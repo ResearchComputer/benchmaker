@@ -119,6 +119,6 @@ async def test_app_serves_recorded_turns_streaming_and_not():
                     "messages": _messages(5)}) as resp:
                 body = await resp.json()
             assert body["choices"][0]["finish_reason"] == "stop"
-            assert app["misses"] == 1
+            assert R.get_misses(app) == 1
     finally:
         await runner.cleanup()

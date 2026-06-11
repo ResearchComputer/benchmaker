@@ -24,6 +24,12 @@ from benchmaker.swebench.trajectory import (
 
 log = logging.getLogger("benchmaker.replay_server")
 
+# aiohttp >=3.9 prefers typed AppKey over string keys (avoids NotAppKeyWarning).
+# MISSES_KEY holds a one-element list so the miss count is mutated *in place* —
+# the handler never reassigns an app key after startup (which aiohttp deprecates).
+STORE_KEY: "web.AppKey" = web.AppKey("store", dict)
+MISSES_KEY: "web.AppKey" = web.AppKey("misses", list)
+
 
 def count_assistant_messages(messages: Any) -> int:
     return sum(1 for m in (messages or [])
@@ -102,11 +108,11 @@ def _terminal_turn() -> RecordedTurn:
 
 
 def as_app(store: dict, *, model_fallback: str = "") -> web.Application:
-    """Build the aiohttp app. `app["misses"]` counts replay misses
-    (unknown key or turn overflow) for the caller to surface."""
+    """Build the aiohttp app. Replay misses (unknown key or turn overflow) are
+    counted in place; read them with `get_misses(app)`."""
     app = web.Application()
-    app["store"] = store
-    app["misses"] = 0
+    app[STORE_KEY] = store
+    app[MISSES_KEY] = [0]
 
     async def handle(request: web.Request) -> web.StreamResponse:
         try:
@@ -118,7 +124,7 @@ def as_app(store: dict, *, model_fallback: str = "") -> web.Application:
         stream = bool(body.get("stream"))
         turn, key, idx = select_turn(store, messages)
         if turn is None:
-            app["misses"] += 1
+            app[MISSES_KEY][0] += 1
             log.warning("replay miss key=%s turn_index=%s (serving terminal stop)", key, idx)
             turn = _terminal_turn()
         response_id = f"chatcmpl-replay-{key}-{idx}"
@@ -137,6 +143,11 @@ def as_app(store: dict, *, model_fallback: str = "") -> web.Application:
     app.router.add_post("/v1/chat/completions", handle)
     app.router.add_post("/chat/completions", handle)
     return app
+
+
+def get_misses(app: web.Application) -> int:
+    """Number of replay misses served by `app` (read after the run)."""
+    return app[MISSES_KEY][0]
 
 
 async def start_server(store: dict, host: str, port: int) -> web.AppRunner:
