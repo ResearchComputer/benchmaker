@@ -157,3 +157,10 @@ def test_load_store_last_wins_on_duplicate_key(tmp_path):
     out.write_text(json.dumps(a.to_dict()) + "\n" + json.dumps(b.to_dict()) + "\n")
     store = T.load_store(out)
     assert store["k"].turns[0].content == "second"
+
+
+def test_convert_job_empty_dir_writes_no_file(tmp_path):
+    out = tmp_path / "out.jsonl"
+    n = T.convert_job(tmp_path, out)
+    assert n == 0
+    assert not out.exists()

@@ -208,16 +208,20 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
 def convert_job(job_dir: Any, out_path: Any) -> int:
     """Convert every `<trial>/agent/pi-container.log` under `job_dir` into one
     consolidated JSONL at `out_path` (one trajectory per line). Returns the
-    number of trajectories written; empty trajectories are skipped."""
+    number of trajectories written; empty trajectories are skipped. Writes no
+    file when no logs are found."""
     job_dir = Path(job_dir)
     out_path = Path(out_path)
     logs = sorted(job_dir.glob("*/agent/pi-container.log"))
+    if not logs:
+        log.warning("no pi-container.log files found under %s", job_dir)
+        return 0
     n = 0
-    with out_path.open("w") as fh:
+    with out_path.open("w", encoding="utf-8") as fh:
         for lp in logs:
             trial = lp.parent.parent.name
             try:
-                text = lp.read_text()
+                text = lp.read_text(encoding="utf-8")
             except Exception as e:  # pragma: no cover - fs failure
                 log.warning("could not read %s: %s", lp, e)
                 continue
@@ -233,16 +237,17 @@ def convert_job(job_dir: Any, out_path: Any) -> int:
 
 def load_store(path: Any) -> dict[str, Trajectory]:
     """Load a consolidated trajectory JSONL into a `key -> Trajectory` map.
-    Duplicate keys: last line wins (logged)."""
+    Duplicate keys: last line wins (logged). Corrupt lines are skipped (logged)."""
     store: dict[str, Trajectory] = {}
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
                 d = json.loads(line)
-            except Exception:
+            except Exception as e:
+                log.warning("skipping corrupt JSONL line in %s: %s", path, e)
                 continue
             traj = Trajectory.from_dict(d)
             if traj.key in store:
