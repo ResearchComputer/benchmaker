@@ -196,3 +196,28 @@ def test_convert_job_placeholder_ids_dont_collide(tmp_path):
     assert len(store) == 2  # distinct prompts -> distinct keys, no collision on "?"
     iids = sorted(t.instance_id for t in store.values())
     assert iids == ["astropy__astropy-1", "django__django-2"]
+
+
+def test_sha1_key_agrees_between_list_and_string_content():
+    # The recorded log stores the prompt as a list-of-blocks; pi's HTTP request
+    # sends it as a plain string. Both must hash to the SAME replay key, or every
+    # placeholder-id task becomes a permanent replay miss.
+    text = "Fix A.\n# Task: ?\nRepository: x\n## Problem statement\nsome bug\n"
+    list_msgs = [{"role": "user", "content": [{"type": "text", "text": text}]}]
+    str_msgs = [{"role": "user", "content": text}]
+    assert T.task_key_from_messages(list_msgs) == T.task_key_from_messages(str_msgs)
+
+
+def test_convert_job_handles_pi_host_logs(tmp_path):
+    log_text = _pi_log(
+        {"type": "message_start", "message": {"role": "user", "content": "Fix.\n# Task: x__x-9\n"}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "ok"}], "stopReason": "endTurn",
+         "model": "m", "usage": {"input": 1, "output": 1, "totalTokens": 2}}},
+    )
+    d = tmp_path / "x__x-9__zzz" / "agent"
+    d.mkdir(parents=True)
+    (d / "pi-host.log").write_text(log_text)
+    out = tmp_path / "t.jsonl"
+    assert T.convert_job(tmp_path, out) == 1
+    assert set(T.load_store(out)) == {"x__x-9"}

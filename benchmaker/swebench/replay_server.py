@@ -160,10 +160,11 @@ def get_misses(app: web.Application) -> int:
     return app[MISSES_KEY][0]
 
 
-async def start_server(store: dict, host: str, port: int) -> web.AppRunner:
+async def start_server(store: dict, host: str, port: int, *,
+                       model_fallback: str = "") -> web.AppRunner:
     """Start the app on host:port and return its (already set up) runner.
     Caller is responsible for `await runner.cleanup()`."""
-    app = as_app(store)
+    app = as_app(store, model_fallback=model_fallback)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
@@ -182,11 +183,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--port", type=int, default=9100)
     a = p.parse_args(argv)
     store = load_store(a.trajectories)
+    fallback = next((t.model for t in store.values() if t.model), "")
     print(f"loaded {len(store)} trajectories; serving on "
           f"http://{a.host}:{a.port}/v1/chat/completions")
 
     async def _run() -> None:
-        runner = await start_server(store, a.host, a.port)
+        runner = await start_server(store, a.host, a.port, model_fallback=fallback)
         try:
             while True:
                 await asyncio.sleep(3600)

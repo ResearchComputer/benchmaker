@@ -71,7 +71,8 @@ class SWEBenchReplayRecipe(Recipe):
             click.option("--host", default="127.0.0.1", show_default=True,
                          help="Replay server bind host (use 0.0.0.0 for container mode)."),
             click.option("--port", type=int, default=9100, show_default=True,
-                         help="Replay server bind port."),
+                         help="Replay server bind port (0 = ephemeral; good for "
+                              "pi-host sweeps)."),
             click.option("--reachable-host", "reachable_host", default=None,
                          help="Host/IP the sandbox dials to reach the replay server "
                               "(container mode)."),
@@ -149,7 +150,7 @@ class SWEBenchReplayRecipe(Recipe):
         # and `job_name` vary per run (set inside `_run_one`).
         base_ns = argparse.Namespace(
             dataset=dataset, agent=mode, model=run_model,
-            api_base=replay_url, api_key="replay",
+            api_key="replay",
             agent_kwarg=[], agent_config_file=None,
             n_tasks=n_tasks, task=list(task),
             n_attempts=n_attempts, timeout_multiplier=timeout_multiplier,
@@ -163,7 +164,7 @@ class SWEBenchReplayRecipe(Recipe):
         try:
             for c in concurrencies:
                 results.append(asyncio.run(self._run_one(
-                    store, base_ns, c, run_model, host, port,
+                    store, base_ns, c, run_model, host, port, reachable_host,
                     timeline, utilization_interval_sec)))
         finally:
             if tmpdir is not None:
@@ -177,11 +178,13 @@ class SWEBenchReplayRecipe(Recipe):
         return None
 
     async def _run_one(self, store, base_ns, concurrency, run_model, host, port,
-                       timeline, utilization_interval_sec) -> tuple:
+                       reachable_host, timeline, utilization_interval_sec) -> tuple:
         """Serve `store` on host:port and run one harbor job at `concurrency`.
 
-        `base_ns` carries the static harbor config; this copies it and stamps the
-        per-run `concurrency` + `job_name`."""
+        Binds a fresh listener per call (pass --port 0 for an ephemeral port,
+        which sidesteps rebind contention across a sweep); the agent endpoint URL
+        is built from the *actually bound* port. `base_ns` carries the static
+        harbor config; this deep-copies it and stamps the per-run fields."""
         import copy
 
         from aiohttp import web
@@ -196,7 +199,9 @@ class SWEBenchReplayRecipe(Recipe):
         site = web.TCPSite(runner, host, port)
         await site.start()
         try:
-            ns = copy.copy(base_ns)
+            bound_port = site._server.sockets[0].getsockname()[1]
+            ns = copy.deepcopy(base_ns)
+            ns.api_base = _replay_url(host, bound_port, reachable_host)
             ns.concurrency = concurrency
             ns.job_name = (f"replay_{datetime.now().strftime('%Y-%m-%d__%H-%M-%S')}"
                            f"_c{concurrency}_{secrets.token_hex(2)}")

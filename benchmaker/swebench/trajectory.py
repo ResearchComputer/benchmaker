@@ -218,9 +218,14 @@ def convert_job(job_dir: Any, out_path: Any) -> int:
     file when no logs are found."""
     job_dir = Path(job_dir)
     out_path = Path(out_path)
-    logs = sorted(job_dir.glob("*/agent/pi-container.log"))
+    # Both pi modes write the same `pi --mode json` event stream, under
+    # pi-container.log (container mode) or pi-host.log (host mode).
+    logs = sorted(
+        p for pat in ("*/agent/pi-container.log", "*/agent/pi-host.log")
+        for p in job_dir.glob(pat)
+    )
     if not logs:
-        log.warning("no pi-container.log files found under %s", job_dir)
+        log.warning("no pi-container.log/pi-host.log files found under %s", job_dir)
         return 0
     n = 0
     with out_path.open("w", encoding="utf-8") as fh:
