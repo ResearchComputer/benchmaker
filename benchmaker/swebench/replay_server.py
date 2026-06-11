@@ -48,7 +48,10 @@ def select_turn(store: dict, messages: Any):
 
 
 def _message_dict(turn: RecordedTurn) -> dict:
-    msg: dict[str, Any] = {"role": "assistant", "content": turn.content or ""}
+    # OpenAI returns content=null (not "") on tool-only turns; match that so a
+    # client that branches on `content is None` behaves as it did against the
+    # live server.
+    msg: dict[str, Any] = {"role": "assistant", "content": turn.content or None}
     if turn.reasoning:
         msg["reasoning_content"] = turn.reasoning
     if turn.tool_calls:
@@ -85,6 +88,13 @@ def turn_to_openai_response(turn: RecordedTurn, model: str, *, response_id: str)
 
 
 def turn_to_sse_lines(turn: RecordedTurn, model: str, *, response_id: str) -> list[str]:
+    """Reconstruct a minimal OpenAI SSE stream for `turn`.
+
+    Deterministic replay does not need token-level streaming, so we emit the
+    whole assistant message as a single content+tool_calls delta, then a finish
+    chunk carrying `finish_reason` + `usage`, then `[DONE]`. Each tool_call
+    carries an `index` (required by OpenAI-compatible streaming parsers).
+    """
     created = int(time.time())
     delta = _message_dict(turn)
     for i, tc in enumerate(delta.get("tool_calls", [])):

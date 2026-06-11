@@ -122,3 +122,12 @@ async def test_app_serves_recorded_turns_streaming_and_not():
             assert R.get_misses(app) == 1
     finally:
         await runner.cleanup()
+
+
+def test_empty_content_turn_serializes_content_null():
+    turn = RecordedTurn(0, "", None,
+                        [{"id": "c1", "name": "bash", "arguments": {}}],
+                        "tool_calls", {})
+    resp = R.turn_to_openai_response(turn, "m", response_id="x")
+    assert resp["choices"][0]["message"]["content"] is None
+    assert resp["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "bash"
