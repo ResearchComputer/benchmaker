@@ -62,7 +62,7 @@ def test_parse_pi_conversation_extracts_turns_and_key():
                  "arguments": {"command": "ls"}},
             ],
             "stopReason": "toolUse", "model": "zai-org/GLM-4.7-Flash",
-            "usage": {"input": 1513, "output": 124, "cacheRead": 0,
+            "usage": {"input": 1513, "output": 124, "cacheRead": 0, "cacheWrite": 5,
                       "totalTokens": 1637, "cost": {"total": 0.0}}}},
         {"type": "turn_end", "message": {
             "role": "assistant",
@@ -83,7 +83,7 @@ def test_parse_pi_conversation_extracts_turns_and_key():
     assert t0.finish_reason == "tool_calls"
     assert t0.tool_calls == [{"id": "call_a", "name": "bash", "arguments": {"command": "ls"}}]
     assert t0.usage == {"prompt_tokens": 1513, "completion_tokens": 124,
-                        "total_tokens": 1637, "cache_read": 0, "cost": 0.0}
+                        "total_tokens": 1637, "cache_read": 0, "cache_write": 5, "cost": 0.0}
 
     t1 = traj.turns[1]
     assert t1.finish_reason == "stop" and t1.content == "done"
@@ -92,6 +92,19 @@ def test_parse_pi_conversation_extracts_turns_and_key():
 def test_parse_pi_conversation_empty_log_is_safe():
     traj = T.parse_pi_conversation("")
     assert traj.turns == [] and traj.key == _key_helper("")
+
+
+def test_parse_pi_conversation_skips_malformed_turn_end():
+    log = _pi_log(
+        {"type": "message_start", "message": {"role": "user", "content": "# Task: x__x-1\n"}},
+        {"type": "turn_end"},                       # no message key
+        {"type": "turn_end", "message": None},      # null message
+        {"type": "turn_end", "message": {"role": "assistant",
+            "content": [{"type": "text", "text": "ok"}], "stopReason": "endTurn",
+            "model": "m", "usage": {"input": 1, "output": 1, "totalTokens": 2}}},
+    )
+    traj = T.parse_pi_conversation(log)
+    assert len(traj.turns) == 1 and traj.turns[0].content == "ok"
 
 
 def _key_helper(text: str) -> str:

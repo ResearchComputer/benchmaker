@@ -19,7 +19,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -134,6 +134,8 @@ def _usage_from_pi(u: Any) -> dict:
         out["total_tokens"] = int(u["totalTokens"])
     if isinstance(u.get("cacheRead"), (int, float)):
         out["cache_read"] = int(u["cacheRead"])
+    if isinstance(u.get("cacheWrite"), (int, float)):
+        out["cache_write"] = int(u["cacheWrite"])
     cost = u.get("cost")
     cost_total = cost.get("total") if isinstance(cost, dict) else None
     if isinstance(cost_total, (int, float)):
@@ -155,7 +157,7 @@ def _turn_from_assistant(msg: dict, index: int) -> RecordedTurn:
             reasoning = (reasoning or "") + (b.get("thinking") or "")
         elif bt == "toolCall":
             tool_calls.append({
-                "id": b.get("id") or f"call_{index}",
+                "id": b.get("id") or f"call_{index}_{len(tool_calls)}",
                 "name": b.get("name") or "",
                 "arguments": b.get("arguments") if isinstance(b.get("arguments"), dict) else {},
             })
