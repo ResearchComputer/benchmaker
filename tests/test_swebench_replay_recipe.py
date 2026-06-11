@@ -44,3 +44,13 @@ def test_requires_exactly_one_source(tmp_path):
     res = CliRunner().invoke(cmd, [])  # neither --job nor --trajectories
     assert res.exit_code != 0
     assert "exactly one of --job or --trajectories" in res.output
+
+
+def test_rejects_both_sources(tmp_path):
+    cmd = make_command(get("swebench-replay"))
+    traj = tmp_path / "t.jsonl"
+    traj.write_text("")
+    res = CliRunner().invoke(cmd, ["--job", str(tmp_path),
+                                   "--trajectories", str(traj)])
+    assert res.exit_code != 0
+    assert "exactly one of --job or --trajectories" in res.output

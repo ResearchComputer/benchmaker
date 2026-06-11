@@ -112,9 +112,8 @@ class SWEBenchReplayRecipe(Recipe):
             utilization_interval_sec) -> Optional[int]:
         from benchmaker.swebench import harbor_eval as he
         from benchmaker.swebench import trajectory as T
-        from benchmaker.swebench.observability import run_job_with_observability
 
-        if bool(job) == bool(trajectories):
+        if (job is None) == (trajectories is None):
             raise click.UsageError("provide exactly one of --job or --trajectories.")
         if shared.dotenv:
             load_dotenv(shared.dotenv)
@@ -146,34 +145,49 @@ class SWEBenchReplayRecipe(Recipe):
         click.echo(f"replay: {len(store)} trajectories, model={run_model}, "
                    f"agent={mode}, url={replay_url}, concurrencies={concurrencies}")
 
+        # Static harbor config shared by every sweep iteration; only `concurrency`
+        # and `job_name` vary per run (set inside `_run_one`).
+        base_ns = argparse.Namespace(
+            dataset=dataset, agent=mode, model=run_model,
+            api_base=replay_url, api_key="replay",
+            agent_kwarg=[], agent_config_file=None,
+            n_tasks=n_tasks, task=list(task),
+            n_attempts=n_attempts, timeout_multiplier=timeout_multiplier,
+            force_build=False, backend_type=backend_type,
+            request_timeout_sec=request_timeout_sec,
+            agent_ready_timeout_sec=agent_ready_timeout_sec,
+            jobs_dir=jobs_dir,
+        )
+
         results: list[tuple] = []
         try:
             for c in concurrencies:
-                row = asyncio.run(self._run_one(
-                    he, run_job_with_observability, store, c, replay_url, run_model,
-                    mode, host, port, dataset, n_tasks, list(task), n_attempts,
-                    timeout_multiplier, backend_type, request_timeout_sec,
-                    agent_ready_timeout_sec, jobs_dir, timeline,
-                    utilization_interval_sec))
-                results.append(row)
+                results.append(asyncio.run(self._run_one(
+                    store, base_ns, c, run_model, host, port,
+                    timeline, utilization_interval_sec)))
         finally:
             if tmpdir is not None:
                 tmpdir.cleanup()
 
-        # 3) Comparison table.
+        # Comparison table.
         click.echo("\nCONCURRENCY  ACCURACY  PASS/TOTAL  MISSES  JOB_DIR")
         for c, accuracy, n_pass, n_total, misses, job_dir in results:
             click.echo(f"{c:>11}  {accuracy:>7.1%}  {n_pass:>4}/{n_total:<5}  "
                        f"{misses:>6}  {job_dir}")
         return None
 
-    async def _run_one(self, he, run_job_with_observability, store, concurrency,
-                       replay_url, run_model, mode, host, port, dataset, n_tasks,
-                       task, n_attempts, timeout_multiplier, backend_type,
-                       request_timeout_sec, agent_ready_timeout_sec, jobs_dir,
+    async def _run_one(self, store, base_ns, concurrency, run_model, host, port,
                        timeline, utilization_interval_sec) -> tuple:
+        """Serve `store` on host:port and run one harbor job at `concurrency`.
+
+        `base_ns` carries the static harbor config; this copies it and stamps the
+        per-run `concurrency` + `job_name`."""
+        import copy
+
         from aiohttp import web
 
+        from benchmaker.swebench import harbor_eval as he
+        from benchmaker.swebench.observability import run_job_with_observability
         from benchmaker.swebench.replay_server import as_app, get_misses
 
         app = as_app(store, model_fallback=run_model)
@@ -182,19 +196,10 @@ class SWEBenchReplayRecipe(Recipe):
         site = web.TCPSite(runner, host, port)
         await site.start()
         try:
-            job_name = (f"replay_{datetime.now().strftime('%Y-%m-%d__%H-%M-%S')}"
-                        f"_c{concurrency}_{secrets.token_hex(2)}")
-            ns = argparse.Namespace(
-                dataset=dataset, agent=mode, model=run_model,
-                api_base=replay_url, api_key="replay",
-                agent_kwarg=[], agent_config_file=None,
-                n_tasks=n_tasks, task=task or None, concurrency=concurrency,
-                n_attempts=n_attempts, timeout_multiplier=timeout_multiplier,
-                force_build=False, backend_type=backend_type,
-                request_timeout_sec=request_timeout_sec,
-                agent_ready_timeout_sec=agent_ready_timeout_sec,
-                job_name=job_name, jobs_dir=jobs_dir,
-            )
+            ns = copy.copy(base_ns)
+            ns.concurrency = concurrency
+            ns.job_name = (f"replay_{datetime.now().strftime('%Y-%m-%d__%H-%M-%S')}"
+                           f"_c{concurrency}_{secrets.token_hex(2)}")
             job_config = he._build_job_config(ns)
             job, job_result, summary_text = await run_job_with_observability(
                 job_config, flash_url=os.environ.get("FLASH_SANDBOX_URL"),
