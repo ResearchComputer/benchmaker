@@ -73,3 +73,52 @@ def test_turn_to_sse_lines_terminate_with_done():
     final = json.loads(lines[1][len("data: "):])
     assert final["choices"][0]["finish_reason"] == "stop"
     assert final["usage"]["total_tokens"] == 21
+
+
+import socket
+
+import pytest
+from aiohttp import web
+import aiohttp
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@pytest.mark.asyncio
+async def test_app_serves_recorded_turns_streaming_and_not():
+    app = R.as_app(_store())
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    base = f"http://127.0.0.1:{port}/v1/chat/completions"
+    try:
+        async with aiohttp.ClientSession() as s:
+            # turn 0 (non-streaming) -> tool call
+            async with s.post(base, json={"model": "m", "stream": False,
+                    "messages": _messages(0)}) as resp:
+                body = await resp.json()
+            assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "bash"
+
+            # turn 1 (streaming) -> final text + [DONE]
+            async with s.post(base, json={"model": "m", "stream": True,
+                    "messages": _messages(1)}) as resp:
+                text = await resp.text()
+            assert "data: [DONE]" in text
+            assert '"content": "done"' in text
+
+            # overflow -> terminal stop, miss counted
+            async with s.post(base, json={"model": "m", "stream": False,
+                    "messages": _messages(5)}) as resp:
+                body = await resp.json()
+            assert body["choices"][0]["finish_reason"] == "stop"
+            assert app["misses"] == 1
+    finally:
+        await runner.cleanup()

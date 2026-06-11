@@ -99,3 +99,85 @@ def _terminal_turn() -> RecordedTurn:
     """A clean stop, served on a replay miss so a divergent run ends not hangs."""
     return RecordedTurn(index=-1, content="", reasoning=None, tool_calls=[],
                         finish_reason="stop", usage={})
+
+
+def as_app(store: dict, *, model_fallback: str = "") -> web.Application:
+    """Build the aiohttp app. `app["misses"]` counts replay misses
+    (unknown key or turn overflow) for the caller to surface."""
+    app = web.Application()
+    app["store"] = store
+    app["misses"] = 0
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        messages = body.get("messages") or []
+        model = body.get("model") or model_fallback
+        stream = bool(body.get("stream"))
+        turn, key, idx = select_turn(store, messages)
+        if turn is None:
+            app["misses"] += 1
+            log.warning("replay miss key=%s turn_index=%s (serving terminal stop)", key, idx)
+            turn = _terminal_turn()
+        response_id = f"chatcmpl-replay-{key}-{idx}"
+        if stream:
+            resp = web.StreamResponse(
+                status=200, headers={"Content-Type": "text/event-stream"})
+            await resp.prepare(request)
+            for line in turn_to_sse_lines(turn, model, response_id=response_id):
+                await resp.write(line.encode())
+            await resp.write_eof()
+            return resp
+        return web.json_response(
+            turn_to_openai_response(turn, model, response_id=response_id))
+
+    # Accept both /v1/... and /... so it works whichever base URL the agent uses.
+    app.router.add_post("/v1/chat/completions", handle)
+    app.router.add_post("/chat/completions", handle)
+    return app
+
+
+async def start_server(store: dict, host: str, port: int) -> web.AppRunner:
+    """Start the app on host:port and return its (already set up) runner.
+    Caller is responsible for `await runner.cleanup()`."""
+    app = as_app(store)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+    return runner
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    import argparse
+    import asyncio
+    p = argparse.ArgumentParser(
+        description="Serve recorded SWE-bench trajectories as an "
+                    "OpenAI-compatible replay endpoint.")
+    p.add_argument("trajectories", help="Path to replay-trajectories.jsonl.")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=9100)
+    a = p.parse_args(argv)
+    store = load_store(a.trajectories)
+    print(f"loaded {len(store)} trajectories; serving on "
+          f"http://{a.host}:{a.port}/v1/chat/completions")
+
+    async def _run() -> None:
+        runner = await start_server(store, a.host, a.port)
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await runner.cleanup()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:  # pragma: no cover
+        pass
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
