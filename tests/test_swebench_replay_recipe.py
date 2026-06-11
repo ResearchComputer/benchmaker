@@ -54,3 +54,21 @@ def test_rejects_both_sources(tmp_path):
                                    "--trajectories", str(traj)])
     assert res.exit_code != 0
     assert "exactly one of --job or --trajectories" in res.output
+
+
+def test_resolve_task_filter_defaults_to_store_instance_ids():
+    from benchmaker.swebench.trajectory import Trajectory
+    store = {
+        "k1": Trajectory(key="k1", instance_id="a__a-1", model="m", turns=[]),
+        "k2": Trajectory(key="k2", instance_id="b__b-2", model="m", turns=[]),
+        "k3": Trajectory(key="k3", instance_id=None, model="m", turns=[]),
+    }
+    ids, missing = SR._resolve_task_filter((), store)
+    assert ids == ["a__a-1", "b__b-2"]  # only the recorded tasks, sorted
+    assert missing == 1                 # the null-instance_id one is uncovered
+
+
+def test_resolve_task_filter_honors_explicit_task():
+    # An explicit --task wins over the store-derived default.
+    ids, missing = SR._resolve_task_filter(("x__x-9",), {})
+    assert ids == ["x__x-9"] and missing == 0

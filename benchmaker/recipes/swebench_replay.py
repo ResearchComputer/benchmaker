@@ -44,6 +44,22 @@ def _parse_concurrencies(sweep: Optional[str], concurrency: int) -> list[int]:
     return [int(x.strip()) for x in sweep.split(",") if x.strip()]
 
 
+def _resolve_task_filter(task, store) -> tuple[list[str], int]:
+    """Which dataset tasks to run, and how many trajectories can't be targeted.
+
+    Default to exactly the recorded tasks (each trajectory's instance_id) so
+    harbor replays only what we have trajectories for — otherwise it would run
+    the whole ``--dataset`` and every task without a recording becomes a replay
+    miss. An explicit ``--task`` wins (the user is narrowing on purpose).
+    Returns ``(task_ids, n_missing_instance_id)``."""
+    explicit = list(task)
+    if explicit:
+        return explicit, 0
+    ids = sorted({t.instance_id for t in store.values() if t.instance_id})
+    missing = sum(1 for t in store.values() if not t.instance_id)
+    return ids, missing
+
+
 class SWEBenchReplayRecipe(Recipe):
     name = "swebench-replay"
     help = (
@@ -82,7 +98,8 @@ class SWEBenchReplayRecipe(Recipe):
             click.option("--dataset", default="swebench-verified", show_default=True,
                          help="Harbor dataset slug."),
             click.option("--n-tasks", "n_tasks", type=int, default=None,
-                         help="Cap the number of dataset tasks."),
+                         help="Cap the number of recorded tasks to replay "
+                              "(applied on top of the recorded-task filter)."),
             click.option("--task", multiple=True,
                          help="Restrict to specific task name(s)/glob(s). Repeatable."),
             click.option("--n-attempts", "n_attempts", type=int, default=1,
@@ -141,10 +158,21 @@ class SWEBenchReplayRecipe(Recipe):
         if not run_model:
             raise click.UsageError("--model required (no model recorded in trajectories).")
 
+        # Run exactly the recorded tasks, not the whole dataset (see helper).
+        task_filter, n_missing = _resolve_task_filter(task, store)
+        if n_missing:
+            click.echo(f"warning: {n_missing} trajectories have no instance_id "
+                       f"and cannot be targeted; they will be skipped.")
+        if not task_filter:
+            raise click.UsageError(
+                "no task ids resolved from the trajectories (and no --task given); "
+                "cannot select which tasks to replay.")
+
         replay_url = _replay_url(host, port, reachable_host)
         concurrencies = _parse_concurrencies(sweep, concurrency)
-        click.echo(f"replay: {len(store)} trajectories, model={run_model}, "
-                   f"agent={mode}, url={replay_url}, concurrencies={concurrencies}")
+        click.echo(f"replay: {len(store)} trajectories, {len(task_filter)} tasks, "
+                   f"model={run_model}, agent={mode}, url={replay_url}, "
+                   f"concurrencies={concurrencies}")
 
         # Static harbor config shared by every sweep iteration; only `concurrency`
         # and `job_name` vary per run (set inside `_run_one`).
@@ -152,7 +180,7 @@ class SWEBenchReplayRecipe(Recipe):
             dataset=dataset, agent=mode, model=run_model,
             api_key="replay",
             agent_kwarg=[], agent_config_file=None,
-            n_tasks=n_tasks, task=list(task),
+            n_tasks=n_tasks, task=task_filter,
             n_attempts=n_attempts, timeout_multiplier=timeout_multiplier,
             force_build=False, backend_type=backend_type,
             request_timeout_sec=request_timeout_sec,
