@@ -164,3 +164,35 @@ def test_convert_job_empty_dir_writes_no_file(tmp_path):
     n = T.convert_job(tmp_path, out)
     assert n == 0
     assert not out.exists()
+
+
+def test_task_key_placeholder_id_falls_back_to_hash():
+    # Real recorded runs emit "# Task: ?"; distinct prompts must NOT collide.
+    a = [{"role": "user", "content": "Fix A.\n# Task: ?\nRepository: x"}]
+    b = [{"role": "user", "content": "Fix B.\n# Task: ?\nRepository: y"}]
+    ka, kb = T.task_key_from_messages(a), T.task_key_from_messages(b)
+    assert ka.startswith("sha1:") and kb.startswith("sha1:")
+    assert ka != kb
+
+
+def test_convert_job_placeholder_ids_dont_collide(tmp_path):
+    log_a = _pi_log(
+        {"type": "message_start", "message": {"role": "user", "content": "Fix A.\n# Task: ?\n"}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "a"}], "stopReason": "endTurn",
+         "model": "m", "usage": {"input": 1, "output": 1, "totalTokens": 2}}},
+    )
+    log_b = _pi_log(
+        {"type": "message_start", "message": {"role": "user", "content": "Fix B.\n# Task: ?\n"}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "b"}], "stopReason": "endTurn",
+         "model": "m", "usage": {"input": 1, "output": 1, "totalTokens": 2}}},
+    )
+    _write_job(tmp_path, "astropy__astropy-1__aaa", log_a)
+    _write_job(tmp_path, "django__django-2__bbb", log_b)
+    out = tmp_path / "t.jsonl"
+    assert T.convert_job(tmp_path, out) == 2
+    store = T.load_store(out)
+    assert len(store) == 2  # distinct prompts -> distinct keys, no collision on "?"
+    iids = sorted(t.instance_id for t in store.values())
+    assert iids == ["astropy__astropy-1", "django__django-2"]

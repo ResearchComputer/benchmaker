@@ -102,7 +102,13 @@ def _message_text(content: Any) -> str:
 
 def _instance_id_from_text(text: str) -> Optional[str]:
     m = _TASK_RE.search(text or "")
-    return m.group(1) if m else None
+    iid = m.group(1) if m else None
+    # Real recorded runs emit a literal "# Task: ?" when harbor's context lacked
+    # an instance_id; that placeholder is neither usable nor unique, so return
+    # None and let the caller fall back to hashing the full (unique) prompt.
+    if iid is None or iid == "?":
+        return None
+    return iid
 
 
 def _key_from_text(text: str) -> str:
@@ -227,6 +233,10 @@ def convert_job(job_dir: Any, out_path: Any) -> int:
                 continue
             traj = parse_pi_conversation(text)
             traj.trial = trial
+            if traj.instance_id is None and trial:
+                # Trial dir is "<instance_id>__<random-suffix>"; recover the id
+                # for display (the *key* still comes from the prompt hash).
+                traj.instance_id = trial.rsplit("__", 1)[0] or None
             if not traj.turns:
                 log.warning("no turns parsed from %s; skipping", lp)
                 continue
