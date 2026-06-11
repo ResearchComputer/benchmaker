@@ -119,3 +119,85 @@ def task_key_from_messages(messages: Any) -> str:
         if isinstance(m, dict) and m.get("role") == "user":
             return _key_from_text(_message_text(m.get("content")))
     return _key_from_text("")
+
+
+def _usage_from_pi(u: Any) -> dict:
+    """Map pi's usage block to OpenAI-named token fields."""
+    if not isinstance(u, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if isinstance(u.get("input"), (int, float)):
+        out["prompt_tokens"] = int(u["input"])
+    if isinstance(u.get("output"), (int, float)):
+        out["completion_tokens"] = int(u["output"])
+    if isinstance(u.get("totalTokens"), (int, float)):
+        out["total_tokens"] = int(u["totalTokens"])
+    if isinstance(u.get("cacheRead"), (int, float)):
+        out["cache_read"] = int(u["cacheRead"])
+    cost = u.get("cost")
+    cost_total = cost.get("total") if isinstance(cost, dict) else None
+    if isinstance(cost_total, (int, float)):
+        out["cost"] = float(cost_total)
+    return out
+
+
+def _turn_from_assistant(msg: dict, index: int) -> RecordedTurn:
+    content = ""
+    reasoning: Optional[str] = None
+    tool_calls: list[dict] = []
+    for b in msg.get("content") or []:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if bt == "text":
+            content += b.get("text") or ""
+        elif bt == "thinking":
+            reasoning = (reasoning or "") + (b.get("thinking") or "")
+        elif bt == "toolCall":
+            tool_calls.append({
+                "id": b.get("id") or f"call_{index}",
+                "name": b.get("name") or "",
+                "arguments": b.get("arguments") if isinstance(b.get("arguments"), dict) else {},
+            })
+    finish = "tool_calls" if (tool_calls or msg.get("stopReason") == "toolUse") else "stop"
+    return RecordedTurn(
+        index=index, content=content, reasoning=reasoning, tool_calls=tool_calls,
+        finish_reason=finish, usage=_usage_from_pi(msg.get("usage")),
+    )
+
+
+def parse_pi_conversation(log_text: str) -> Trajectory:
+    """Parse one pi `--mode json` log into a `Trajectory`.
+
+    Assistant outputs come from `turn_end` events (one per LLM call, carrying
+    full `usage`); the task key comes from the first `user` message. Corrupt or
+    unexpected lines are skipped.
+    """
+    first_user_text: Optional[str] = None
+    model: Optional[str] = None
+    turns: list[RecordedTurn] = []
+    for raw in log_text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            ev = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if first_user_text is None:
+            msg = ev.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                first_user_text = _message_text(msg.get("content"))
+        if ev.get("type") == "turn_end":
+            msg = ev.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                if model is None and isinstance(msg.get("model"), str):
+                    model = msg["model"]
+                turns.append(_turn_from_assistant(msg, index=len(turns)))
+    text = first_user_text or ""
+    return Trajectory(
+        key=_key_from_text(text), instance_id=_instance_id_from_text(text),
+        model=model or "", turns=turns,
+    )

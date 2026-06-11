@@ -41,3 +41,58 @@ def test_task_key_handles_list_content_and_hash_fallback():
     messages = [{"role": "user", "content": [{"type": "text", "text": "no task marker here"}]}]
     key = T.task_key_from_messages(messages)
     assert key.startswith("sha1:") and len(key) > 10
+
+
+def _pi_log(*events) -> str:
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+def test_parse_pi_conversation_extracts_turns_and_key():
+    log = _pi_log(
+        {"type": "session", "id": "s1"},
+        {"type": "message_start", "message": {"role": "user", "content": [
+            {"type": "text", "text": "Fix it.\n# Task: django__django-11095\nRepository: django"}]}},
+        "{ this is a corrupt line",  # must be skipped, not raise
+        {"type": "turn_end", "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "let me look"},
+                {"type": "text", "text": "investigating"},
+                {"type": "toolCall", "id": "call_a", "name": "bash",
+                 "arguments": {"command": "ls"}},
+            ],
+            "stopReason": "toolUse", "model": "zai-org/GLM-4.7-Flash",
+            "usage": {"input": 1513, "output": 124, "cacheRead": 0,
+                      "totalTokens": 1637, "cost": {"total": 0.0}}}},
+        {"type": "turn_end", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+            "stopReason": "endTurn", "model": "zai-org/GLM-4.7-Flash",
+            "usage": {"input": 2000, "output": 10, "totalTokens": 2010}}},
+    )
+    traj = T.parse_pi_conversation(log)
+    assert traj.key == "django__django-11095"
+    assert traj.instance_id == "django__django-11095"
+    assert traj.model == "zai-org/GLM-4.7-Flash"
+    assert len(traj.turns) == 2
+
+    t0 = traj.turns[0]
+    assert t0.index == 0
+    assert t0.content == "investigating"
+    assert t0.reasoning == "let me look"
+    assert t0.finish_reason == "tool_calls"
+    assert t0.tool_calls == [{"id": "call_a", "name": "bash", "arguments": {"command": "ls"}}]
+    assert t0.usage == {"prompt_tokens": 1513, "completion_tokens": 124,
+                        "total_tokens": 1637, "cache_read": 0, "cost": 0.0}
+
+    t1 = traj.turns[1]
+    assert t1.finish_reason == "stop" and t1.content == "done"
+
+
+def test_parse_pi_conversation_empty_log_is_safe():
+    traj = T.parse_pi_conversation("")
+    assert traj.turns == [] and traj.key == _key_helper("")
+
+
+def _key_helper(text: str) -> str:
+    return T._key_from_text(text)
