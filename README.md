@@ -157,6 +157,38 @@ Full docs live in [`docs/`](docs/):
 - [CLI & YAML reference](docs/cli-and-yaml.md)
 - [ShareGPT benchmark](docs/sharegpt-benchmark.md) — self-contained end-to-end walkthrough
 
+## Deterministic replay (`swebench-replay`)
+
+Re-run a recorded SWE-bench job with the LLM **mocked from its own logs** — the
+real pi + sandbox + verifier pipeline still runs, only the model is served back
+from recorded outputs, so re-runs are deterministic and free of model
+cost/variance. Vary `--concurrency` (or `--sweep`) to study the rest of the
+pipeline without the model's stochasticity as a confound. Still needs
+`FLASH_SANDBOX_URL` (the sandbox + verifier are real).
+
+```bash
+# 1) (optional) convert a job's pi logs to a replay store — the recipe can also
+#    do this inline via --job.
+python -m benchmaker.swebench.trajectory jobs/2026-06-08__05-24-01_b352cb \
+    -o replay-trajectories.jsonl
+
+# 2) replay (host mode, localhost) across a concurrency sweep
+FLASH_SANDBOX_URL=http://localhost:8080 \
+  benchmaker swebench-replay --trajectories replay-trajectories.jsonl \
+    --mode pi-host --sweep 1,5,25
+
+# container mode: bind 0.0.0.0 and tell the sandbox how to reach the server
+FLASH_SANDBOX_URL=http://localhost:8080 \
+  benchmaker swebench-replay --job jobs/2026-06-08__05-24-01_b352cb \
+    --mode pi-container --host 0.0.0.0 --reachable-host "$(hostname -I | awk '{print $1}')"
+```
+
+The replay server is stateless: it picks each response by the task's identity
+(the `# Task:` line, falling back to a hash of the full prompt when the recorded
+run lacked an instance id) plus the count of assistant messages already in the
+request — so it is correct at any concurrency. A `MISSES` column in the summary
+flags any divergence (a request beyond the recorded turns).
+
 ## Examples
 
 Under [`examples/`](examples/):
@@ -191,7 +223,7 @@ benchmaker/          # library code
   core/              #   engine: types, load models, runner, metrics, monitors, trace
   io/                #   run output: per-run bundle + cross-run collection
   workloads/         #   workload-types (http, llm, sandbox, agent, hf, eval)
-  recipes/           #   CLI recipes (http, llm, sandbox, swebench) + registry
+  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay) + registry
   swebench/          #   SWE-bench coding agent + grading + harbor adapters
 examples/            # runnable examples (incl. swebench/ coding-agent config)
 tools/               # out-of-tree tooling: sharegpt/, swe_images/, agent_warmup/
