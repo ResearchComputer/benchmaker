@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "benchmaker"
-version = "0.1.0"
+version = "0.1.1"
 description = "Async HTTP benchmarking utility with pluggable workloads and load models."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,12 +18,11 @@ dependencies = [
     "pyarrow>=24.0.0",
     "pyyaml>=6.0",
     "swebench>=4.1.0",
-    # SWE-bench evaluation runs through harbor (the `benchmaker swebench` recipe).
-    # harbor has no PyPI release — it's the local research package. A bare
-    # `harbor` requirement would risk pulling an unrelated PyPI project, so we
-    # pin the local checkout directly. Adjust the path for your environment, or
-    # install it editable yourself: `pip install -e <path-to>/research/harbor`.
-    "harbor @ file:///home/xiayao/Documents/projects/researchcomputer/harbor",
+    # NOTE: The `benchmaker swebench` recipe also needs `harbor`, the local
+    # research package. It has no PyPI release and can't be declared here — PyPI
+    # rejects direct (file://, git+, https) references in published metadata, and
+    # a bare `harbor` would risk pulling an unrelated PyPI project. Install it
+    # manually for that recipe: `pip install -e <path-to>/research/harbor`.
 ]
 
 [project.optional-dependencies]
