@@ -72,3 +72,20 @@ def test_resolve_task_filter_honors_explicit_task():
     # An explicit --task wins over the store-derived default.
     ids, missing = SR._resolve_task_filter(("x__x-9",), {})
     assert ids == ["x__x-9"] and missing == 0
+
+
+def test_resolve_url_host_loopback_and_reachable():
+    assert SR._resolve_url_host("127.0.0.1", None) == "127.0.0.1"
+    assert SR._resolve_url_host("0.0.0.0", None) == "127.0.0.1"      # bind-all -> loopback URL
+    assert SR._resolve_url_host("0.0.0.0", "10.0.0.5") == "10.0.0.5"  # reachable host wins
+    assert SR._resolve_url_host("localhost", None) == "localhost"
+
+
+def test_pi_container_loopback_fails_fast():
+    # pi-container + a loopback URL (no --reachable-host) is unreachable from the
+    # sandbox; the recipe must reject it up front with the fix.
+    cmd = make_command(get("swebench-replay"))
+    res = CliRunner().invoke(cmd, ["--mode", "pi-container",
+                                   "--trajectories", "nonexistent.jsonl"])
+    assert res.exit_code != 0
+    assert "pi-container" in res.output and "reachable-host" in res.output

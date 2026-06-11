@@ -31,11 +31,21 @@ from benchmaker.recipes import register
 from benchmaker.recipes.base import Recipe, SharedOpts
 
 
+# Hosts the agent cannot reach from *inside* a sandbox container (they resolve
+# to the container's own loopback, not this host).
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _resolve_url_host(host: str, reachable_host: Optional[str]) -> str:
+    """The host the agent will actually dial. A 0.0.0.0/:: bind is not itself
+    dialable, so fall back to loopback unless an explicit reachable host is
+    given."""
+    return reachable_host or (host if host not in ("0.0.0.0", "::") else "127.0.0.1")
+
+
 def _replay_url(host: str, port: int, reachable_host: Optional[str]) -> str:
-    """Base URL the agent should dial. A 0.0.0.0/:: bind is not itself dialable,
-    so fall back to loopback unless an explicit reachable host is given."""
-    h = reachable_host or (host if host not in ("0.0.0.0", "::") else "127.0.0.1")
-    return f"http://{h}:{port}/v1"
+    """Base URL the agent should dial."""
+    return f"http://{_resolve_url_host(host, reachable_host)}:{port}/v1"
 
 
 def _parse_concurrencies(sweep: Optional[str], concurrency: int) -> list[int]:
@@ -133,6 +143,17 @@ class SWEBenchReplayRecipe(Recipe):
 
         if (job is None) == (trajectories is None):
             raise click.UsageError("provide exactly one of --job or --trajectories.")
+        # pi-container runs inside the sandbox; a loopback replay URL resolves to
+        # the container's own loopback, not this host, so the agent can never
+        # reach the mock LLM. Fail fast with the fix instead of a cryptic
+        # connection error mid-run.
+        if mode == "pi-container" and _resolve_url_host(host, reachable_host) in _LOOPBACK_HOSTS:
+            raise click.UsageError(
+                "--mode pi-container runs inside the sandbox and cannot reach a "
+                f"loopback replay URL ({_resolve_url_host(host, reachable_host)}). "
+                "Either pass --reachable-host <ip/dns the sandbox can reach this "
+                "host at> (with --host 0.0.0.0), or use --mode pi-host (pi runs "
+                "locally and reaches 127.0.0.1 directly).")
         if shared.dotenv:
             load_dotenv(shared.dotenv)
         he._normalize_openai_env()
