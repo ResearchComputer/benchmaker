@@ -1,0 +1,21 @@
+# Prefix-replay SWE-smith trajectories against an OpenAI-compatible endpoint.
+# Records meta.expected_prefix_tokens (tokenizer upper bound) vs
+# extra.cached_tokens (server actual). closed-loop keeps same-conversation turns
+# adjacent for clean prefix-cache locality.
+workload_type:
+  type: openai
+  url: ${OPENAI_API_BASE_URL}/chat/completions
+  model: ${OPENAI_MODEL}
+  passthrough_meta: true
+
+workload:
+  type: trajectory
+  dataset: SWE-bench/SWE-smith-trajectories
+  split: tool
+  tokenizer: Qwen/Qwen2.5-Coder-7B-Instruct
+  max_trajectories: 50
+  max_tokens: 1024
+
+load: closed:4
+duration: 24h        # exhaustion ends the run; the clock is just a ceiling
+timeout_s: 600

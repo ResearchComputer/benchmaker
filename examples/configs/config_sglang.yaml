@@ -1,0 +1,16 @@
+# Benchmark a native SGLang /generate endpoint.
+workload_type:
+  type: sglang-generate
+  url: http://localhost:30000/generate
+  max_tokens: 256
+  temperature: 0.0
+  top_p: 0.9
+
+workload:
+  type: jsonl
+  path: examples/data/prompts.jsonl
+  field: text
+
+load: poisson:8
+duration: 60s
+timeout_s: 600

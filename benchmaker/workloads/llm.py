@@ -36,6 +36,21 @@ _ENV_MODEL_KEYS = ("OPENAI_COMPATIBLE_MODEL", "OPENAI_MODEL")
 _ENV_KEY_KEYS = ("OPENAI_API_KEY",)
 
 
+# Keys that are legal OpenAI/vLLM/SGLang chat-completions *body* params. In
+# passthrough_meta mode, only these (plus configured extra_body keys) flow into
+# the request body; every other row key is recorded into Request.meta instead.
+# `stream` is intentionally excluded — we always force streaming for metrics.
+# `max_new_tokens` is intentionally NOT in this set — it is handled separately
+# via the `max_tokens` alias in `_split_passthrough`.
+_OPENAI_BODY_KEYS = frozenset({
+    "messages", "max_tokens", "temperature", "top_p", "top_k", "n", "stop",
+    "presence_penalty", "frequency_penalty", "repetition_penalty", "seed",
+    "logprobs", "top_logprobs", "logit_bias", "response_format", "tools",
+    "tool_choice", "min_tokens", "ignore_eos", "guided_json", "guided_regex",
+    "guided_choice",
+})
+
+
 class OpenAIChatWorkloadType(WorkloadType):
     streaming = True
     name = "openai-chat"
@@ -51,6 +66,7 @@ class OpenAIChatWorkloadType(WorkloadType):
         api_key: Optional[str] = None,
         timeout_s: Optional[float] = 600.0,
         name: str = "openai-chat",
+        passthrough_meta: bool = False,
         **sampling: Any,
     ):
         """Any extra keyword argument (e.g. ``min_tokens``, ``ignore_eos``,
@@ -63,6 +79,7 @@ class OpenAIChatWorkloadType(WorkloadType):
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._passthrough_meta = passthrough_meta
         merged: dict[str, Any] = dict(extra_body or {})
         merged.update(sampling)
         self._extra_body = merged
@@ -122,6 +139,36 @@ class OpenAIChatWorkloadType(WorkloadType):
 
         return cls(url=url, model=model, api_key=api_key, **kwargs)
 
+    def _split_passthrough(self, item: dict) -> tuple[dict, dict]:
+        """Split a full row into (body_part, meta_part) for passthrough mode.
+
+        Allowlisted body params + configured extra_body keys go to the body;
+        `max_new_tokens` aliases to `max_tokens`; a row `model` becomes a
+        recorded label (never the target); an explicit `meta:{}` merges into
+        meta; everything else is recorded into meta (not sent).
+
+        When BOTH `max_tokens` and `max_new_tokens` are present, the explicit
+        `max_tokens` wins (flows into the body via the allowlist) and the stray
+        `max_new_tokens` is recorded into meta.
+        """
+        allowed = _OPENAI_BODY_KEYS | set(self._extra_body.keys())
+        body_part: dict[str, Any] = {}
+        meta_part: dict[str, Any] = {}
+        for k, v in item.items():
+            if k == "meta" and isinstance(v, dict):
+                meta_part.update(v)
+            elif k == "prompt":
+                body_part["prompt"] = v  # promoted to messages below
+            elif k == "model":
+                meta_part["model_label"] = v
+            elif k == "max_new_tokens" and "max_tokens" not in item:
+                body_part["max_tokens"] = v
+            elif k in allowed:
+                body_part[k] = v
+            else:
+                meta_part[k] = v
+        return body_part, meta_part
+
     async def make_request(self, item: Any) -> Request:
         body: dict[str, Any] = {
             "model": self._model,
@@ -131,6 +178,7 @@ class OpenAIChatWorkloadType(WorkloadType):
             **self._extra_body,
         }
         body.setdefault("stream_options", {"include_usage": True})
+        meta_extra: dict[str, Any] = {}
 
         if item is None:
             body["messages"] = [{"role": "user", "content": ""}]
@@ -139,25 +187,32 @@ class OpenAIChatWorkloadType(WorkloadType):
         elif isinstance(item, list):
             body["messages"] = item
         elif isinstance(item, dict):
+            if self._passthrough_meta:
+                # _split_passthrough builds fresh dicts; the caller's input is
+                # never mutated (matches the dict(item) copy in the else branch).
+                item, meta_extra = self._split_passthrough(item)
+            else:
+                item = dict(item)
             # Promote "prompt" -> messages if no messages provided.
             if "messages" not in item and "prompt" in item:
-                item = dict(item)
                 item["messages"] = [{"role": "user", "content": item.pop("prompt")}]
             body.update(item)
             body.setdefault("messages", [{"role": "user", "content": ""}])
         else:
             raise TypeError(f"OpenAIChatWorkloadType cannot interpret item {type(item).__name__}")
 
+        # Row metadata first, then canonical keys last so they always win over
+        # any same-named row field (e.g. a dataset column named "prompt_messages").
+        meta: dict[str, Any] = dict(meta_extra)
+        meta["prompt_messages"] = body["messages"]
+        meta["max_tokens"] = body.get("max_tokens")
         return Request(
             method="POST",
             url=self._url,
             headers=dict(self._headers),
             json=body,
             timeout_s=self._timeout_s,
-            meta={
-                "prompt_messages": body["messages"],
-                "max_tokens": body.get("max_tokens"),
-            },
+            meta=meta,
         )
 
     async def make_sample(self, item: Any, request: Request, response: Response,
@@ -170,6 +225,7 @@ class OpenAIChatWorkloadType(WorkloadType):
         token_arrival_times: list[float] = []
         usage_completion_tokens: Optional[int] = None
         prompt_tokens: Optional[int] = None
+        cached_tokens: Optional[int] = None
         finish_reason: Optional[str] = None
 
         for raw, t in zip(chunks, chunk_times):
@@ -193,6 +249,11 @@ class OpenAIChatWorkloadType(WorkloadType):
                         usage_completion_tokens = int(u["completion_tokens"])
                     if u.get("prompt_tokens") is not None:
                         prompt_tokens = int(u["prompt_tokens"])
+                    details = u.get("prompt_tokens_details")
+                    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+                        cached_tokens = int(details["cached_tokens"])
+                    elif u.get("cached_tokens") is not None:
+                        cached_tokens = int(u["cached_tokens"])
                 for ch in obj.get("choices") or []:
                     delta = ch.get("delta") or {}
                     if delta.get("content"):
@@ -223,6 +284,8 @@ class OpenAIChatWorkloadType(WorkloadType):
         sample.extra["tokens_out"] = float(completion_tokens)
         if prompt_tokens is not None:
             sample.extra["prompt_tokens"] = float(prompt_tokens)
+        if cached_tokens is not None:
+            sample.extra["cached_tokens"] = float(cached_tokens)
 
         if completion_tokens > 0 and ttft is not None and response.elapsed_s > ttft:
             sample.extra["tokens_per_s"] = completion_tokens / (response.elapsed_s - ttft)

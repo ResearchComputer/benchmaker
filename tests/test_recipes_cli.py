@@ -124,7 +124,8 @@ def live_server():
 
 def test_registry_has_expected_recipes():
     names = {r.name for r in all_recipes()}
-    assert names == {"http", "llm", "sandbox", "swebench", "swebench-replay"}
+    assert names == {"http", "llm", "sglang", "sandbox", "swebench",
+                     "swebench-replay", "trajectory-replay"}
 
 
 def test_recipes_registered_as_subcommands():
@@ -280,3 +281,33 @@ def test_swebench_requires_sandbox_url(monkeypatch):
     res = CliRunner().invoke(main, ["swebench", "--model", "m", "--dotenv", ""])
     assert res.exit_code != 0
     assert "FLASH_SANDBOX_URL" in res.output
+
+
+# ---------------------------------------------------------------- full-jsonl-row
+
+import glob
+import os
+import tempfile
+
+
+def test_llm_full_jsonl_row_records_metadata(live_server):
+    with tempfile.TemporaryDirectory() as d:
+        rows = os.path.join(d, "rows.jsonl")
+        with open(rows, "w") as f:
+            f.write(json.dumps({
+                "messages": [{"role": "user", "content": "hi"}],
+                "conversation_id": "conv-42",
+            }) + "\n")
+        out = os.path.join(d, "runs")
+        res = CliRunner().invoke(main, [
+            "llm", "--url", f"{live_server}/v1/chat/completions",
+            "--model", "stub", "--prompts-jsonl", rows, "--full-jsonl-row",
+            "--rate", "5", "--duration", "0.3s", "--dotenv", "",
+            "--out-dir", out, "--quiet",
+        ])
+        assert res.exit_code == 0, res.output
+        samples = glob.glob(os.path.join(out, "**", "samples.jsonl"), recursive=True)
+        assert samples, "no samples.jsonl written"
+        recs = [json.loads(l) for l in open(samples[0]) if l.strip()]
+        assert recs and all(r["meta"].get("conversation_id") == "conv-42"
+                            for r in recs)

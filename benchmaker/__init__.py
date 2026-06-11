@@ -19,6 +19,8 @@ from benchmaker.workloads.http import HttpWorkloadType
 from benchmaker.workloads.llm import OpenAIChatWorkloadType
 from benchmaker.workloads.sandbox import SandboxWorkloadType
 from benchmaker.workloads.hf import HFDatasetWorkload
+from benchmaker.workloads.sglang import SGLangGenerateWorkloadType
+from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
 from benchmaker.workloads.agent import (
     Agent,
     AgentContext,
@@ -87,6 +89,8 @@ __all__ = [
     "OpenAIChatWorkloadType",
     "SandboxWorkloadType",
     "HFDatasetWorkload",
+    "SGLangGenerateWorkloadType",
+    "TrajectoryReplayWorkload",
     # agent workload (pluggable user-defined agents)
     "Agent",
     "AgentContext",

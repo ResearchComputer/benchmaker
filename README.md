@@ -45,7 +45,8 @@ asyncio.run(main())
 ```
 
 Or via the CLI. Workload-specific benchmarks are exposed as **recipes** —
-`benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`):
+`benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`, `sglang`,
+`trajectory-replay`):
 
 ```bash
 benchmaker http --url https://httpbin.org/get --rate poisson:50 --duration 10s
@@ -156,6 +157,9 @@ Full docs live in [`docs/`](docs/):
 - [Correctness / accuracy eval](docs/eval.md) — grade responses against references
 - [CLI & YAML reference](docs/cli-and-yaml.md)
 - [ShareGPT benchmark](docs/sharegpt-benchmark.md) — self-contained end-to-end walkthrough
+- `benchmaker sglang` — native SGLang `/generate` benchmark (see [`docs/sglang.md`](docs/sglang.md)).
+- `benchmaker trajectory-replay` — multi-turn prefix-cache parity replay of
+  trajectory datasets like SWE-smith (see [`docs/trajectory-replay.md`](docs/trajectory-replay.md)).
 
 ## Deterministic replay (`swebench-replay`)
 

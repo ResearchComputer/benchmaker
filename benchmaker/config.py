@@ -88,6 +88,9 @@ def build_workload_type(spec: dict) -> WorkloadType:
         return HttpWorkloadType(**kwargs)
     if t in ("openai", "openai-chat", "llm-chat", "llm"):
         return OpenAIChatWorkloadType(**kwargs)
+    if t in ("sglang", "sglang-generate"):
+        from benchmaker.workloads.sglang import SGLangGenerateWorkloadType
+        return SGLangGenerateWorkloadType(**kwargs)
     if t in ("sandbox", "flash-sandbox"):
         return SandboxWorkloadType(**kwargs)
     if t == "agent":
@@ -151,6 +154,9 @@ def build_workload(spec: Any) -> Workload:
         return CallableWorkload(fn=fn, **kwargs)
     if t in ("hf", "huggingface"):
         return HFDatasetWorkload(**kwargs)
+    if t == "trajectory":
+        from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
+        return TrajectoryReplayWorkload(**kwargs)
     raise ValueError(f"Unknown workload type {t!r}")
 
 

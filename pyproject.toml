@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rich = ["rich>=13"]
-hf = ["datasets>=2.18"]
+hf = ["datasets>=2.18", "transformers>=4.40"]
 dev = ["pytest>=7", "pytest-asyncio>=0.23"]
 plot = [
     "ipykernel>=7.2.0",

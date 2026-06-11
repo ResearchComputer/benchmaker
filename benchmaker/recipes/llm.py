@@ -36,6 +36,12 @@ class LlmRecipe(Recipe):
                          help="JSONL file of prompts."),
             click.option("--prompt-field", "prompt_field", default="prompt",
                          help="Field to extract from each JSONL row (default: 'prompt')."),
+            click.option("--full-jsonl-row/--no-full-jsonl-row", "full_jsonl_row",
+                         default=False,
+                         help="Yield each full JSONL object to the workload type "
+                              "(preserve row metadata into samples.jsonl) instead "
+                              "of extracting one field. Equivalent: "
+                              "--prompt-field '' / none."),
             click.option("--shuffle/--no-shuffle", default=True,
                          help="Shuffle prompts (static only)."),
             click.option("--seed", type=int, default=0),
@@ -54,8 +60,9 @@ class LlmRecipe(Recipe):
         ]
 
     def build(self, shared: SharedOpts, *, url, model, api_key, header, prompts,
-              prompts_jsonl, prompt_field, shuffle, seed, max_tokens, min_tokens,
-              ignore_eos, temperature, top_p, top_k, stop, extras) -> BuildResult:
+              prompts_jsonl, prompt_field, full_jsonl_row, shuffle, seed,
+              max_tokens, min_tokens, ignore_eos, temperature, top_p, top_k,
+              stop, extras) -> BuildResult:
         from benchmaker.config import build_workload
         from benchmaker.workloads.llm import OpenAIChatWorkloadType
 
@@ -90,6 +97,15 @@ class LlmRecipe(Recipe):
                 parsed = v
             wt_kwargs[k.strip()] = parsed
 
+        full_row = full_jsonl_row or (prompt_field or "").strip().lower() in (
+            "", "none", "null")
+        if full_row and prompts:
+            raise click.UsageError(
+                "--full-jsonl-row (or an empty --prompt-field) requires "
+                "--prompts-jsonl; it has no effect with static --prompt.")
+        if full_row:
+            wt_kwargs["passthrough_meta"] = True
+
         wt = OpenAIChatWorkloadType.from_env(
             url=url, model=model, api_key=api_key,
             dotenv_path=shared.dotenv,
@@ -107,7 +123,7 @@ class LlmRecipe(Recipe):
             workload_spec = {
                 "type": "jsonl",
                 "path": prompts_jsonl,
-                "field": prompt_field,
+                "field": None if full_row else prompt_field,
             }
         workload = build_workload(workload_spec)
 
