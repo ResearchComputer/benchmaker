@@ -2,8 +2,10 @@
 """Unit tests for the command-timeout-under-load helpers."""
 from __future__ import annotations
 
+import glob
 import json
 import math
+import os
 
 import pytest
 
@@ -110,3 +112,25 @@ def test_recover_drops_first_when_two_assistants_without_result(tmp_path):
          "message": {"role": "toolResult", "timestamp": 2500, "content": []}},
     ]
     assert recover_command_timings(_log(tmp_path, rows)) == [CommandTiming("read", 0.5)]
+
+
+C1_DIR = "jobs/replay_2026-06-11__17-21-48_c1_0d73"
+
+
+@pytest.mark.skipif(not os.path.isdir(C1_DIR), reason="local c1 jobs dir not present")
+def test_curve_on_real_c1_is_monotonic_and_baseline_matches():
+    tasks = []
+    for tdir in glob.glob(os.path.join(C1_DIR, "*")):
+        lp = os.path.join(tdir, "agent", "pi-container.log")
+        rj = os.path.join(tdir, "result.json")
+        if not (os.path.exists(lp) and os.path.exists(rj)):
+            continue
+        timings = recover_command_timings(lp)
+        max_d = max((c.duration_s for c in timings), default=0.0)
+        with open(rj) as f:
+            reward = (json.load(f).get("verifier_result") or {}).get("rewards", {}).get("reward")
+        tasks.append((float(reward or 0.0), max_d))
+    pts = accuracy_curve(tasks, [math.inf, 30, 5, 1])
+    accs = [p.accuracy for p in pts]
+    assert accs == sorted(accs, reverse=True)                       # monotonic
+    assert pts[0].n_solved == sum(1 for r, _ in tasks if r == 1.0)  # baseline = recorded solved
