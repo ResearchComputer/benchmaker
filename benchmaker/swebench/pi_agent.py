@@ -486,7 +486,9 @@ class _ExecBridge:
 
     def __init__(self, environment: BaseEnvironment, *, cwd: str,
                  exec_timeout_s: float, host: str = "127.0.0.1",
-                 spans_path: Optional[Path] = None):
+                 spans_path: Optional[Path] = None,
+                 load_factor: Optional[float] = None,
+                 inject_timeout_s: Optional[float] = None):
         self._env = environment
         self._cwd = cwd
         self._exec_timeout_s = exec_timeout_s
@@ -495,6 +497,14 @@ class _ExecBridge:
         self._port: int = 0
         self.count = 0
         self._spans_path = spans_path
+        # Command-timeout-under-load injection (no-op unless load_factor > 1).
+        if load_factor is None:
+            load_factor = float(os.environ.get("BENCH_LOAD_FACTOR", "1") or "1")
+        if inject_timeout_s is None:
+            inject_timeout_s = float(os.environ.get("BENCH_TIMEOUT_S", "0") or "0") \
+                or float(exec_timeout_s)
+        self._load_factor = float(load_factor)
+        self._inject_timeout_s = float(inject_timeout_s)
 
     @property
     def url(self) -> str:
@@ -514,6 +524,15 @@ class _ExecBridge:
             try:
                 res = await self._env.exec(command=full, cwd=self._cwd, timeout_sec=timeout)
                 rc = int(res.return_code)
+                elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                if self._should_inject_timeout(elapsed):
+                    self._emit_span(start, -1)
+                    return web.json_response({
+                        "return_code": -1,
+                        "stdout": "",
+                        "stderr": (f"command timed out after {int(self._inject_timeout_s)}s "
+                                   f"(injected load_factor={self._load_factor:g})"),
+                    })
                 self._emit_span(start, rc)
                 return web.json_response({
                     "return_code": rc,
@@ -540,6 +559,16 @@ class _ExecBridge:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+
+    def _should_inject_timeout(self, elapsed_s: float) -> bool:
+        """True when a command of real duration ``elapsed_s`` would time out
+        under the configured load factor: ``load_factor * elapsed_s > inject_timeout_s``
+        (equivalently ``elapsed_s > tau`` with ``tau = inject_timeout_s / load_factor``)."""
+        if self._load_factor <= 1.0:
+            return False
+        from benchmaker.swebench.timeout_load import effective_tau, would_time_out
+        return would_time_out(elapsed_s,
+                              effective_tau(self._inject_timeout_s, self._load_factor))
 
     def _emit_span(self, start: "datetime", rc: int) -> None:
         if self._spans_path is None:
