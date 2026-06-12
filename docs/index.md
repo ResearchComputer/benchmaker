@@ -51,6 +51,9 @@ A benchmark in benchmaker is the composition of four things:
     raw-text parity checks, streaming metrics.
 13. [Trajectory replay](trajectory-replay.md) — prefix-cache parity benchmarking with
     multi-turn trajectory datasets; expected vs actual cached tokens.
+14. [Command timeouts under load](command-timeout-under-load.md) — deterministic
+    `accuracy(τ)` curve (`τ = T/L`) measuring how per-command timeouts degrade
+    SWE-bench accuracy; offline Tier‑1 analysis + live `BENCH_LOAD_FACTOR` sweep.
 
 ## Where things live
 
