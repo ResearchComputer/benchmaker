@@ -116,6 +116,62 @@ StaticWorkload(items=[
 A 200-status response with zero tokens is marked `ok=False` (error: `"no
 tokens received"`).
 
+**`prompt_tokens`** from the OpenAI `usage` block is captured when present;
+**`cached_tokens`** is also captured when the server returns it (vLLM's prefix
+cache hit count).
+
+### `SGLangGenerateWorkloadType`
+
+SGLang's native `/generate` endpoint. Unlike the OpenAI path, the body is
+`{"text": ..., "sampling_params": {...}, "stream": true}` and streamed events
+carry cumulative `text` plus a `meta_info` object. Prefer the OpenAI path
+where possible; use this for raw-text parity checks.
+
+```python
+SGLangGenerateWorkloadType(
+    url="http://host:30000/generate",
+    max_tokens=128,
+    temperature=0.0,
+    extra_body=None,
+    headers=None,
+    timeout_s=600.0,
+    passthrough_meta=False,
+    **sampling,                 # top_p, top_k, min_p, stop, ...
+)
+```
+
+**`from_env()` classmethod** — reads `SGLANG_API_BASE_URL` or `SGLANG_BASE_URL`
+from the environment (loaded from `.env`), appending `/generate`:
+
+```python
+SGLangGenerateWorkloadType.from_env(url=None, dotenv_path=".env")
+```
+
+**Item interpretation:**
+
+| Item type | Behavior                                                       |
+| --------- | -------------------------------------------------------------- |
+| `str`     | `{"text": item}`                                               |
+| `dict`    | `text`/`input_ids` pulled out; remaining sampling keys merged into `sampling_params`. With `passthrough_meta`, non-sampling keys are recorded into `Request.meta` instead of sent. |
+
+**Sampling keys** (recognized in dict items and forwarded into `sampling_params`):
+`temperature`, `max_new_tokens`, `top_p`, `top_k`, `min_p`, `stop`,
+`stop_token_ids`, `frequency_penalty`, `presence_penalty`,
+`repetition_penalty`, `ignore_eos`, `skip_special_tokens`, `n`, `seed`,
+`min_new_tokens`, `regex`, `json_schema`, `ebnf`.
+
+**Extra metrics captured per request** (in `Sample.extra`):
+
+- `ttft_s`                  — time to first token
+- `itl_ms_mean / itl_ms_p50 / itl_ms_p99` — inter-token latency
+- `tokens_out`              — completion tokens
+- `prompt_tokens`           — from `meta_info`
+- `cached_tokens`           — from `meta_info`
+- `tokens_per_s`            — `tokens_out / (latency - ttft)`
+- `finish_reason`           — in `Sample.meta`
+
+YAML: `workload_type: {type: sglang-generate, url: ...}`.
+
 ### `SandboxWorkloadType`
 
 Drives the [Flash Sandbox](https://github.com/swiss-ai/flash-sandbox) HTTP API.
@@ -237,7 +293,119 @@ load: poisson:20
 duration: 30s
 ```
 
----
+### `AgentWorkloadType`
+
+Run a user-provided Python `Agent` per ticket. Unlike LLM workload-types, no
+request shape is dictated — the agent owns its own client(s) and one "request"
+equals one full agent run (which may be many internal HTTP calls).
+
+**The Agent ABC:**
+
+```python
+class Agent(ABC):
+    @abstractmethod
+    async def run(self, ctx: AgentContext) -> AgentResult: ...
+    async def aclose(self) -> None: ...        # default no-op
+```
+
+**`AgentContext`** — per-task state handed to `Agent.run`:
+
+| Field          | Type                | Meaning                                      |
+| -------------- | ------------------- | -------------------------------------------- |
+| `item`         | `Any`               | The workload item (typically a dict with `prompt`) |
+| `workload_name`| `str`               | Workload-type name                           |
+| `fire`         | `FireRequest | None`| Runner's request-firing callable (optional)  |
+| `start_mono`   | `float`             | Monotonic start time                         |
+
+**`AgentResult`** — what `Agent.run` returns:
+
+| Field          | Type                | Meaning                                      |
+| -------------- | ------------------- | -------------------------------------------- |
+| `output`       | `str`               | Text the grader sees                         |
+| `ok`           | `bool`              | Whether the agent considers this a success   |
+| `error`        | `str | None`        | Error message                                |
+| `request_ok`   | `bool`              | Whether the agent ran without infra failure (default `True`) |
+| `metrics`      | `dict[str, float]`  | Lands in `Sample.extra`                      |
+| `meta`         | `dict[str, Any]`    | Lands in `Sample.meta`                       |
+| `bytes_sent`   | `int`               | Bytes sent by the agent                      |
+| `bytes_recv`   | `int`               | Bytes received by the agent                  |
+
+When `request_ok=False` the sample is bucketed as "fail" (transport error);
+when `request_ok=True` but `ok=False` it's bucketed as "wrong" (delivered
+but graded wrong).
+
+**Constructor:**
+
+```python
+AgentWorkloadType(
+    agent,                          # Agent instance, Agent subclass, or callable
+    agent_kwargs=None,              # forwarded to class constructor when agent is a class
+    reference_key="reference",      # item key carrying the gold reference
+    extra_meta_keys=(),             # additional item keys to copy into Sample.meta
+    name="agent",
+)
+```
+
+`handles_reference = True` — the workload-type splits `reference` out of items
+itself, so `correctness_hook` is installed directly without `EvalWorkloadType`
+wrapping.
+
+**CallableAgent adapter** — a plain callable `(AgentContext) -> AgentResult|dict|str`
+is automatically wrapped in `CallableAgent`:
+
+```python
+AgentWorkloadType(agent=my_function, agent_kwargs={"model": "gpt-4o"})
+```
+
+YAML:
+
+```yaml
+workload_type:
+  type: agent
+  agent: 'mypkg.myagent:MyAgent'
+  agent_kwargs:
+    model: 'gpt-4o-mini'
+  reference_key: reference
+  extra_meta_keys: [task_id]
+```
+
+### `TrajectoryReplayWorkload`
+
+Expands multi-turn agent trajectories into one chat request per assistant
+turn — each request sends the growing message prefix up to (but excluding)
+that turn. Built for prefix-cache / HiCache parity benchmarking against an
+OpenAI-compatible chat endpoint.
+
+```python
+TrajectoryReplayWorkload(
+    dataset=None,                   # HuggingFace dataset id (needs `datasets`)
+    path=None,                      # or local JSONL file
+    split="tool",                   # dataset split
+    messages_field="messages",      # field name for messages in each row
+    id_field="instance_id",         # field name for instance id
+    model_field="model",            # field name for model label
+    max_tokens=1024,                # per-request generation cap
+    max_turns_per_trajectory=None,  # cap assistant turns per trajectory
+    max_trajectories=None,          # cap number of trajectories replayed
+    tokenizer=None,                 # HF tokenizer id; enables expected_prefix_tokens
+)
+```
+
+Provide exactly one of `dataset` or `path`.
+
+**How it works:** Each row's `messages` field is parsed and sanitized
+(`sanitize_message` keeps only OpenAI-valid keys: `role`, `content`, `name`,
+`tool_calls`, `tool_call_id`). For every assistant turn, a workload item is
+emitted containing the prefix messages *before* that turn. The dataset
+exhausts naturally (raises `StopAsyncIteration`), ending the run.
+
+**`expected_prefix_tokens`** — when a `tokenizer` is configured, each item's
+`meta` carries the theoretical upper bound of cacheable prefix (the previous
+turn's prompt token count). Compare to the server's `cached_tokens` to compute
+prefix-cache hit efficiency.
+
+**`parse_messages`** handles both a JSON-encoded string (the format SWE-smith
+ships) and a plain list.
 
 ## Built-in workloads (datasets)
 

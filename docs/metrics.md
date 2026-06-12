@@ -69,7 +69,10 @@ repeatedly on the CLI; pass `labels={...}` from Python.
     "total_requests": 6000,
     "success": 5994,
     "failed": 6,
+    "request_failed": 4,         # transport-level failures (timeout, connection error)
+    "wrong_output": 2,           # delivered OK but graded wrong by a post-hook
     "error_rate": 0.001,
+    "request_failure_rate": 0.0007,
     "throughput_rps": 200.0,    # all responses / wall
     "goodput_rps": 199.8,       # successes only / wall
     "bytes_sent": 1234567,
@@ -117,12 +120,13 @@ One JSON object per line:
   "latency_s": 0.043,
   "status": 200,
   "ok": true,
+  "request_ok": true,
   "bytes_sent": 256,
   "bytes_recv": 1024,
   "error": null,
   "workload": "openai-chat",
   "meta": {"prompt_messages": [...], "max_tokens": 128, "finish_reason": "stop"},
-  "extra": {"ttft_s": 0.17, "itl_ms_mean": 25.3, "tokens_out": 64.0, "tokens_per_s": 32.1}
+  "extra": {"ttft_s": 0.17, "itl_ms_mean": 25.3, "tokens_out": 64.0, "tokens_per_s": 32.1, "cached_tokens": 128.0}
 }
 ```
 
@@ -150,6 +154,16 @@ For `OpenAIChatWorkloadType`, a 200-status response with zero output tokens is
 demoted to `ok=False` (error: `"no tokens received"`), so a server that
 returns empty completions is correctly recorded as failing the workload even
 though the HTTP layer succeeded.
+
+The `request_ok` field distinguishes *transport-level* success from
+*workload-level* success. It stays `True` when the HTTP response came back
+successfully (2xx/3xx) even if a post-hook later flips `ok` to `False` (e.g.
+the eval scorer judged the output wrong). The progress logger uses this to
+split failures into "fail" (transport) vs. "wrong" (delivered but incorrect):
+
+```text
++5 req  (  12.3 rps, 5 ok, 0 wrong, 0 fail) | total=5
+```
 
 A post-hook can also flip `sample.ok` to `False` after the fact.
 

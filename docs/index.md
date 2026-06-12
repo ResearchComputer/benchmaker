@@ -47,11 +47,17 @@ A benchmark in benchmaker is the composition of four things:
     walkthrough: real prompt dataset → OpenAI-compatible endpoint → metrics.
 11. [pi on SWE-bench](pi-swebench.md) — run the pi coding agent on SWE-bench via
     harbor; in-container vs host + remote-bash modes, and the one-command runner.
+12. [SGLang benchmarking](sglang.md) — drive the SGLang native `/generate` endpoint;
+    raw-text parity checks, streaming metrics.
+13. [Trajectory replay](trajectory-replay.md) — prefix-cache parity benchmarking with
+    multi-turn trajectory datasets; expected vs actual cached tokens.
 
 ## Where things live
 
 ```
 benchmaker/        # library code (incl. cli.py — the `benchmaker` CLI)
+  recipes/         # named CLI recipes (http, llm, sandbox, swebench, sglang, ...)
+  swebench/        # SWE-bench eval: harbor agent, trajectory replay, grading
 examples/          # runnable examples
 tests/             # pytest smoke tests
 docs/              # this directory

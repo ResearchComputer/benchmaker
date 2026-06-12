@@ -74,10 +74,44 @@ cfg = BenchConfig(
 TTFT, inter-token latency, and tokens/sec are captured automatically. See
 [Workloads & workload-types](workloads.md#openaichatworkloadtype).
 
+## User-defined agent benchmark
+
+benchmaker supports pluggable Python agents — multi-step pipelines that own
+their own HTTP clients (model API, tools, sandbox, …) instead of going through
+a single request/response cycle:
+
+```python
+import asyncio
+from benchmaker import Agent, AgentContext, AgentResult, AgentWorkloadType
+from benchmaker import BenchConfig, BenchRunner, StaticWorkload, ClosedLoop
+
+class EchoAgent(Agent):
+    async def run(self, ctx: AgentContext) -> AgentResult:
+        task = ctx.item["prompt"]
+        # ... your multi-step pipeline here ...
+        return AgentResult(output=f"echo: {task}", ok=True,
+                           metrics={"steps": 1.0})
+
+cfg = BenchConfig(
+    workload_type=AgentWorkloadType(EchoAgent(), reference_key="reference"),
+    workload=StaticWorkload(items=[
+        {"prompt": "hello", "reference": "echo: hello"},
+        {"prompt": "world", "reference": "echo: world"},
+    ]),
+    load=ClosedLoop(concurrency=4, duration_s=30),
+)
+result = await BenchRunner(cfg).run()
+print(result.summary)
+```
+
+The agent is instantiated once and reused across tickets. `AgentWorkloadType`
+handles reference extraction and correctness grading via the standard
+`correctness_hook`. See [Workloads & workload-types](workloads.md#agentworkloadtype).
+
 ## CLI quick-start
 
 One-liner (a *recipe* — `benchmaker <recipe> --args`; recipes: `http`, `llm`,
-`sandbox`, `swebench`):
+`sandbox`, `sglang`, `swebench`, `trajectory-replay`, `swebench-replay`):
 
 ```bash
 benchmaker http \
@@ -94,6 +128,19 @@ benchmaker run examples/config_llm.yaml \
 
 # pivot many runs into a table
 benchmaker collect ./runs --label variant
+```
+
+```bash
+# SGLang native /generate:
+benchmaker sglang \
+    --url http://localhost:30000/generate \
+    --prompts-jsonl data.jsonl --prompt-field text \
+    --rate poisson:8 --duration 60s
+
+# Trajectory replay (prefix-cache parity):
+benchmaker trajectory-replay --preset swe-smith \
+    --url http://host:8000/v1/chat/completions --model $MODEL \
+    --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct
 ```
 
 See [CLI & YAML reference](cli-and-yaml.md) for the full surface.

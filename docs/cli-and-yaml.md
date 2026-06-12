@@ -5,7 +5,9 @@ into two groups:
 
 - **Recipes** — named, self-contained benchmark scenarios you run as
   `benchmaker <recipe> --args`: `http` (one-off HTTP), `llm` (OpenAI-compatible
-  chat), `sandbox` (Flash Sandbox), and `swebench` (SWE-bench Verified eval).
+  chat), `sandbox` (Flash Sandbox), `swebench` (SWE-bench Verified eval),
+  `sglang` (SGLang native `/generate`), `trajectory-replay` (prefix-cache
+  parity), and `swebench-replay` (deterministic SWE-bench re-evaluation).
 - **Infra commands** — `run` (drive any benchmark from a YAML config file) and
   `collect` (pivot many run-dirs into a table).
 
@@ -105,6 +107,125 @@ Recipe options (plus the shared flags above):
 cover (e.g. `--extra guided_json='{"type":"object"}'`, `--extra frequency_penalty=0.5`).
 It maps 1:1 onto the request body.
 
+## `benchmaker sglang`
+
+Benchmark an SGLang **native** `/generate` endpoint (not the OpenAI-compatible
+path). Prefer `benchmaker llm` where possible; use this for raw-text parity
+checks against deployments that only expose `/generate`. URL falls back to
+`$SGLANG_API_BASE_URL` / `$SGLANG_BASE_URL`.
+
+```bash
+benchmaker sglang \
+    --url http://host:30000/generate \
+    --prompts-jsonl prompts.jsonl --prompt-field text \
+    --max-tokens 256 --temperature 0.0 \
+    --rate poisson:8 --duration 60s \
+    --out-dir ./runs --label endpoint=sglang
+```
+
+Recipe options (plus the shared flags above):
+
+| Flag                          | Meaning                                                                |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| `--url`                       | Endpoint URL. Falls back to `$SGLANG_API_BASE_URL`/`$SGLANG_BASE_URL`. |
+| `-H, --header`                | Extra header `'Name: value'` — repeatable                              |
+| `--prompt`                    | Prompt text — repeatable (mutually exclusive with `--prompts-jsonl`)   |
+| `--prompts-jsonl`             | Path to JSONL of prompts                                               |
+| `--prompt-field`              | Field name in JSONL rows (default `text`)                              |
+| `--full-jsonl-row / --no-full-jsonl-row` | Record every JSONL field into `samples.jsonl` `meta` (default off) |
+| `--shuffle / --no-shuffle`    | Shuffle the static prompt list (default on)                            |
+| `--seed`                      | RNG seed for shuffle (default `0`)                                     |
+| `--max-tokens`                | Max completion tokens (default `128`)                                  |
+| `--temperature`               | Sampling temperature (default `0.0`)                                   |
+| `--top-p`                     | Nucleus sampling threshold                                             |
+| `--top-k`                     | Top-k sampling                                                         |
+| `--extra`                     | Pass-through `'key=value'` (value JSON-decoded if possible) — repeatable |
+
+## `benchmaker trajectory-replay`
+
+Prefix-replay a multi-turn trajectory dataset (e.g. SWE-smith) against an
+OpenAI-compatible endpoint. Each trajectory is expanded into one chat request
+per assistant turn — each request sends the growing message prefix, which
+exercises the server's prefix / radix cache. Items are emitted in conversation
+order; use `--rate closed:N` for clean prefix-cache locality. The run ends
+when the dataset is exhausted.
+
+The **parity pair** per request: `meta.expected_prefix_tokens` (tokenizer
+upper bound) vs `extra.cached_tokens` (server actual). The ratio is the
+prefix-cache hit efficiency.
+
+```bash
+benchmaker trajectory-replay --preset swe-smith \
+    --url http://host:8000/v1/chat/completions --model $MODEL \
+    --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct \
+    --max-trajectories 50 --rate closed:4 --out-dir runs/
+```
+
+Recipe options (plus the shared flags above):
+
+| Flag                          | Meaning                                                                |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| `--url`                       | Endpoint URL. Falls back to `$OPENAI_API_BASE_URL`/`$OPENAI_BASE_URL`. |
+| `--model`                     | Target model. Falls back to `$OPENAI_COMPATIBLE_MODEL`/`$OPENAI_MODEL`. |
+| `--api-key`                   | API key. Falls back to `$OPENAI_API_KEY`.                              |
+| `-H, --header`                | Extra header `'Name: value'` — repeatable                              |
+| `--dataset`                   | HuggingFace dataset id (needs `datasets`). Mutually exclusive with `--prompts-jsonl`. |
+| `--prompts-jsonl`             | Local JSONL of trajectory rows.                                        |
+| `--split`                     | Dataset split (default `tool`).                                        |
+| `--preset`                    | Dataset preset: `swe-smith`.                                           |
+| `--tokenizer`                 | HF tokenizer id; enables exact `expected_prefix_tokens`.               |
+| `--messages-field`            | Field name for messages in each row (default `messages`).              |
+| `--id-field`                  | Field name for instance id (default `instance_id`).                    |
+| `--model-field`               | Field name for model label (default `model`).                          |
+| `--max-tokens`                | Per-request generation cap (default `1024`).                           |
+| `--max-turns-per-trajectory`  | Cap assistant turns replayed per trajectory.                           |
+| `--max-trajectories`          | Cap number of trajectories replayed.                                   |
+
+## `benchmaker swebench-replay`
+
+Deterministic SWE-bench re-evaluation: builds a replay store from recorded pi
+logs (or loads a prebuilt `replay-trajectories.jsonl`), starts a stateless
+replay server in-process, and runs the real harbor SWE-bench pipeline
+(pi + sandbox + verifier) with the model endpoint pointed at the replay
+server. The LLM is the only thing mocked; everything else runs for real, so
+re-runs are deterministic and free of model cost/variance. Requires
+`FLASH_SANDBOX_URL`.
+
+Can run at one `--concurrency` or a `--sweep` of them (e.g. `--sweep 1,5,25`).
+
+```bash
+# Replay a previous harbor job's recorded trajectories at concurrency 4:
+benchmaker swebench-replay --job jobs/2026-01-01__12-00-00_abc123 --concurrency 4
+
+# Sweep concurrencies to find the saturation point:
+benchmaker swebench-replay --trajectories replay-trajectories.jsonl --sweep 1,5,25
+```
+
+Recipe options (plus the shared `--dotenv`):
+
+| Flag                          | Meaning                                                          |
+| ----------------------------- | ---------------------------------------------------------------- |
+| `--job`                       | Harbor job dir to convert (its pi logs).                         |
+| `--trajectories`              | Prebuilt `replay-trajectories.jsonl` (instead of `--job`).      |
+| `--concurrency`               | Concurrent trials, harbor `n_concurrent_trials` (default `4`).  |
+| `--sweep`                     | Comma list of concurrencies to run in sequence (e.g. `'1,5,25'`). |
+| `--mode`                      | `pi-host` (default) or `pi-container`.                           |
+| `--host`                      | Replay server bind host (default `127.0.0.1`; use `0.0.0.0` for container mode). |
+| `--port`                      | Replay server bind port (default `9100`; `0` = ephemeral).      |
+| `--reachable-host`            | Host/IP the sandbox dials to reach the replay server (container mode). |
+| `--model`                     | Model id sent to the agent (default: recorded trajectory model). |
+| `--dataset`                   | Harbor dataset slug (default `swebench-verified`).               |
+| `--n-tasks`                   | Cap the number of recorded tasks to replay.                      |
+| `--task`                      | Restrict to specific task name(s)/glob(s) — repeatable.         |
+| `--n-attempts`                | Attempts per task (default `1`).                                 |
+| `--timeout-multiplier`        | Multiplier on harbor timeouts (default `4.0`).                   |
+| `--backend-type`              | Flash Sandbox backend (default `docker`).                        |
+| `--request-timeout-sec`       | Per-request timeout (default `120.0`).                           |
+| `--agent-ready-timeout-sec`   | Wait for the in-sandbox agent to come up (default `600.0`).      |
+| `--jobs-dir`                  | Parent dir for run bundles (default `jobs`).                     |
+| `--timeline / --no-timeline`  | Capture timeline/utilization into the job dir (default on).      |
+| `--utilization-interval-sec`  | Seconds between utilization polls (default `5.0`).               |
+
 ## `benchmaker sandbox`
 
 Benchmark a [Flash Sandbox](workloads.md) endpoint. `--operation exec` (default)
@@ -127,7 +248,7 @@ Recipe options (plus the shared flags above):
 | Flag                          | Meaning                                                          |
 | ----------------------------- | --------------------------------------------------------------- |
 | `--base-url`                  | Flash Sandbox base URL (required)                               |
-| `--operation`                 | `exec` (default), `create`, or `lifecycle`                      |
+| `--operation`                 | `exec` (default), `create`, `lifecycle`, or `file`              |
 | `-c, --command`               | Command to run — repeatable (one workload item each)            |
 | `--image`                     | Image for the create spec (e.g. `alpine:3.20`)                  |
 | `--spec-json`                 | JSON object merged into the create spec (overrides `--image`)   |
@@ -136,6 +257,10 @@ Recipe options (plus the shared flags above):
 | `--persistent / --no-persistent` | Use `/pshell` so `cd`/`export` persist across exec calls     |
 | `--sandbox-id`                | Target an existing sandbox (exec only)                          |
 | `-H, --header`                | Extra header `'Name: value'` — repeatable                       |
+| `--file-path`                 | Path written then read back in file mode (default `/tmp/benchmaker.bin`) |
+| `--file-content`              | UTF-8 text written in file mode (default `'benchmaker'`)        |
+| `--file-verify-with-exec / --no-file-verify-with-exec` | Also read the file back via an exec verifier (default off) |
+| `--file-verify-command`       | Override the file-mode exec verifier (default `cat <path>`)     |
 
 ## `benchmaker swebench`
 
@@ -180,7 +305,10 @@ Recipe options (plus the shared `--dotenv`):
 | `--agent-ready-timeout-sec`   | Wait for the in-sandbox agent to come up (default `600`)       |
 | `--agent-kwarg`               | Extra agent kwarg `key=value` — repeatable                     |
 | `--agent-config-file`         | YAML forwarded to the agent's `config_file` kwarg             |
-| `--job-name`                  | Harbor job name (defaults to a timestamp)                      |
+| `--job-name`                  | Harbor job name (defaults to a `<datetime>_<randhex>`).       |
+| `--jobs-dir`                  | Parent directory for run bundles (default `jobs`).             |
+| `--timeline / --no-timeline`  | Capture timeline + utilization + tokens into the job dir (default on). |
+| `--utilization-interval-sec`  | Seconds between `/status` utilization polls (default `5.0`).   |
 | `--list-agents`               | List the registry agent keys and exit                         |
 
 ## `benchmaker run`
@@ -196,6 +324,9 @@ Options:
 | --------------------------------------------- | ------------------------------------------------ |
 | `--out-dir`, `--run-id`, `--label`, `--notes` | Run-bundle output (see top of this page)         |
 | `--dotenv`                                    | Path to `.env` (default `.env`)                  |
+| `--record PATH`                               | Write a JSONL request trace (with relative timestamps) to `PATH`. A later run can replay it via `--replay`. Overrides any `record:` in YAML. |
+| `--replay PATH`                               | Replay a previously recorded trace at the same relative timings. Overrides `workload_type` / `workload` / `load` (and any `replay:` in YAML). |
+| `--replay-speed FLOAT`                        | Speed multiplier for `--replay` (default `1.0`; `2.0` = double speed). |
 | `--quiet`                                     | Suppress progress output                         |
 
 ## `benchmaker collect`
@@ -266,6 +397,20 @@ correctness:
     type: exact_match | contains | regex | json_valid | multiple_choice | judge_llm
     # ...scorer-specific kwargs
 
+# ---------- trace recording (optional) ----------
+# Write a JSONL request trace (relative timestamps + full request data)
+# that can be replayed deterministically later.
+record:
+  path: traces/run_baseline.jsonl    # output trace path
+
+# ---------- trace replay (optional, exclusive with workload_type/workload/load) ----------
+# Replay a previously recorded trace at the same relative timings.
+# Overrides workload_type / workload / load.
+replay:
+  path: traces/run_baseline.jsonl    # input trace path
+  speed: 1.0                         # speed multiplier (2.0 = twice as fast)
+  streaming: false                   # match the original workload-type's streaming flag
+
 # ---------- runner knobs (all optional) ----------
 connection_limit: 1000               # aiohttp TCPConnector limit
 timeout_s: 60                        # global default per-request timeout
@@ -278,6 +423,11 @@ progress_every_s: 1.0                # 0 disables progress output
 - `http` — kwargs map to `HttpWorkloadType(...)`.
 - `openai` (or `llm`, `llm-chat`, `openai-chat`) — kwargs map to
   `OpenAIChatWorkloadType(...)`.
+- `sglang-generate` (or `sglang`) — kwargs map to
+  `SGLangGenerateWorkloadType(...)`.
+- `sandbox` (or `flash-sandbox`) — kwargs map to `SandboxWorkloadType(...)`.
+- `agent` — `agent: 'module:ClassOrCallable'` + optional `agent_kwargs:`.
+  Kwargs map to `AgentWorkloadType(...)`.
 - `factory: 'module:fn'` — call `fn(**kwargs)`; must return a `WorkloadType`.
 
 ### `workload` types
@@ -289,6 +439,8 @@ progress_every_s: 1.0                # 0 disables progress output
   eval sets (`gsm8k`, `mmlu`, `humaneval`) or pass `path/name/split/prompt_field/
   reference_field/...` explicitly. Requires `pip install -e .[hf]`. See
   [Workloads & workload-types](workloads.md#hfdatasetworkload).
+- `trajectory` — `TrajectoryReplayWorkload(...)`. Expand multi-turn trajectories
+  into per-turn items. See [Trajectory replay](trajectory-replay.md).
 - `factory: 'module:fn'` — call `fn(**kwargs)`; must return a `Workload`.
 
 You can also write a workload as bare YAML for two shortcuts:

@@ -45,8 +45,8 @@ asyncio.run(main())
 ```
 
 Or via the CLI. Workload-specific benchmarks are exposed as **recipes** —
-`benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`, `sglang`,
-`trajectory-replay`):
+`benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`,
+`swebench-replay`, `sglang`, `trajectory-replay`):
 
 ```bash
 benchmaker http --url https://httpbin.org/get --rate poisson:50 --duration 10s
@@ -157,9 +157,8 @@ Full docs live in [`docs/`](docs/):
 - [Correctness / accuracy eval](docs/eval.md) — grade responses against references
 - [CLI & YAML reference](docs/cli-and-yaml.md)
 - [ShareGPT benchmark](docs/sharegpt-benchmark.md) — self-contained end-to-end walkthrough
-- `benchmaker sglang` — native SGLang `/generate` benchmark (see [`docs/sglang.md`](docs/sglang.md)).
-- `benchmaker trajectory-replay` — multi-turn prefix-cache parity replay of
-  trajectory datasets like SWE-smith (see [`docs/trajectory-replay.md`](docs/trajectory-replay.md)).
+- [SGLang benchmark](docs/sglang.md) — native SGLang `/generate` benchmark
+- [Trajectory replay](docs/trajectory-replay.md) — multi-turn prefix-cache parity replay
 
 ## Deterministic replay (`swebench-replay`)
 
@@ -200,9 +199,12 @@ Under [`examples/`](examples/):
 - `simple_get.py`         — minimal library usage
 - `custom_hooks.py`       — request signing + response parsing
 - `llm_chat.py`           — OpenAI-compatible LLM endpoint with streaming
+- `llm_from_env.py`       — LLM benchmark using `from_env()`
 - `vllm_with_monitor.py`  — LLM benchmark with concurrent vLLM `/metrics` scrape
+- `agent_trove.py`        — user-defined agent benchmark
 - `sandbox_exec.py`       — Flash Sandbox `/exec` latency benchmark
 - `sandbox_lifecycle.py`  — full create → exec → delete cold-start benchmark
+- `bench_sandbox.py` / `bench_sandbox.sh` — sandbox benchmarks
 - `llm_eval.py`           — LLM benchmark + accuracy grading (exact/regex/judge)
 - `gsm8k_eval.py`         — GSM8K from HuggingFace + integer-match scorer
 - `config.yaml`           — generic HTTP YAML config
@@ -226,9 +228,22 @@ benchmaker/          # library code
   config.py  env.py  #   YAML config loading + .env interpolation
   core/              #   engine: types, load models, runner, metrics, monitors, trace
   io/                #   run output: per-run bundle + cross-run collection
-  workloads/         #   workload-types (http, llm, sandbox, agent, hf, eval)
-  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay) + registry
-  swebench/          #   SWE-bench coding agent + grading + harbor adapters
+  workloads/
+    http.py          #   HTTP workload-type
+    llm.py           #   OpenAI-compatible chat workload-type
+    sandbox.py       #   Flash Sandbox workload-type
+    sglang.py        #   SGLang native /generate workload-type
+    agent.py         #   user-defined Agent workload-type
+    trajectory.py    #   multi-turn trajectory replay workload
+    eval.py          #   correctness/accuracy evaluation
+    hf.py            #   HuggingFace dataset source
+    datasets.py      #   generic workload/dataset base classes
+    base.py          #   WorkloadType base class
+  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, trajectory-replay) + registry
+  swebench/
+    trajectory.py    #   convert pi logs to replay trajectories
+    replay_server.py #   mock-LLM replay server for swebench-replay
+    agent.py         #   SWE-bench coding agent + grading + harbor adapters
 examples/            # runnable examples (incl. swebench/ coding-agent config)
 tools/               # out-of-tree tooling: sharegpt/, swe_images/, agent_warmup/
 tests/               # pytest smoke tests

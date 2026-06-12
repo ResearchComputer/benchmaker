@@ -94,6 +94,65 @@ Spec strings: `"sweep:10,50,100,500@30s"` (constant stages, equal duration).
 | When does the system saturate?                                    | `Sweep` or `Ramp`                      |
 | Does the system handle bursts cleanly?                            | `Ramp` followed by a steady stage      |
 
+## Dict form (YAML)
+
+In a YAML config the `load` key can be a dict instead of a rate-spec
+string. This is useful when you need options that the short spec syntax
+doesn't cover (e.g. `seed`, `sweep` labels).
+
+```yaml
+load:
+  type: constant | poisson | closed | ramp | sweep
+  rps: 100
+  duration: 60s
+  seed: 42
+```
+
+### Accepted keys per type
+
+| Type | Keys |
+| ---- | ---- |
+| `constant` | `rps`, `duration`, `max_requests` |
+| `poisson`  | `rps`, `duration`, `max_requests`, `seed` |
+| `closed` / `closed-loop` / `concurrency` | `concurrency`, `duration`, `max_requests` |
+| `ramp`     | `start_rps`, `end_rps`, `duration`, `poisson` (bool), `seed` |
+| `sweep`    | `stages` (list of sub-spec dicts, each with its own `type` / keys); optional `label` per stage |
+
+**`sweep` example:**
+
+```yaml
+load:
+  type: sweep
+  stages:
+    - type: constant
+      rps: 10
+      duration: 30s
+      label: warmup
+    - type: constant
+      rps: 50
+      duration: 30s
+    - type: constant
+      rps: 200
+      duration: 30s
+      label: peak
+```
+
+## Duration parsing
+
+The `duration` field (in both the Python API and the YAML dict form)
+accepts a human-friendly string **or** a bare number (interpreted as
+seconds):
+
+| Value   | Meaning |
+| ------- | ------- |
+| `30s`   | 30 seconds |
+| `500ms` | 0.5 seconds |
+| `2m`    | 120 seconds |
+| `1h`    | 3600 seconds |
+| `60`    | 60 seconds (bare number) |
+
+In Python code you can also use `duration_s` (a float) directly.
+
 ## Duration vs max-requests
 
 Every load model accepts both:

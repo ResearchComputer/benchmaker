@@ -15,6 +15,9 @@ Built-in workload-types:
 
 - `HttpWorkloadType`         — generic HTTP
 - `OpenAIChatWorkloadType`   — OpenAI-compatible `/v1/chat/completions` with SSE streaming and TTFT/ITL/tokens-per-sec capture
+- `SGLangGenerateWorkloadType` — SGLang native `/generate` endpoint with SSE streaming
+- `SandboxWorkloadType`      — Flash Sandbox exec/create/lifecycle/file operations
+- `AgentWorkloadType`        — user-defined Python agents (multi-turn, tool-calling, etc.)
 
 Write your own by subclassing `WorkloadType`. See [Workloads & workload-types](workloads.md#custom-workload-type).
 
@@ -79,16 +82,25 @@ request. See [Hooks](hooks.md).
 ```python
 from benchmaker import (
     BenchConfig, BenchRunner,
-    OpenAIChatWorkloadType, JsonlWorkload,
+    OpenAIChatWorkloadType, SGLangGenerateWorkloadType, JsonlWorkload,
     PoissonRPS, PrometheusMonitor,
 )
 
+# OpenAI-compatible chat:
 cfg = BenchConfig(
     workload_type=OpenAIChatWorkloadType(url="...", model="..."),
     workload=JsonlWorkload(path="prompts.jsonl", field="prompt"),
     load=PoissonRPS(rps=8, duration_s=300),
     monitors=[PrometheusMonitor(url="http://localhost:8000/metrics",
                                 interval_s=1.0)],
+)
+result = await BenchRunner(cfg).run()
+
+# Or SGLang native /generate:
+cfg = BenchConfig(
+    workload_type=SGLangGenerateWorkloadType(url="http://host:30000/generate"),
+    workload=JsonlWorkload(path="prompts.jsonl", field="text"),
+    load=PoissonRPS(rps=8, duration_s=300),
 )
 result = await BenchRunner(cfg).run()
 ```
