@@ -19,13 +19,18 @@ from typing import Iterable, Optional, Union
 
 def effective_tau(timeout_s: float, load_factor: float) -> float:
     """tau = T / L: the per-command time budget under load factor L."""
+    if timeout_s < 0:
+        raise ValueError("timeout_s must be >= 0")
     if load_factor <= 0:
         raise ValueError("load_factor must be > 0")
     return timeout_s / load_factor
 
 
 def would_time_out(duration_s: float, tau_s: float) -> bool:
-    """A command times out iff its natural duration exceeds the budget tau."""
+    """A command times out iff its natural duration exceeds the budget tau.
+
+    See ``task_survives`` for the task-level analogue (max duration vs tau).
+    """
     return duration_s > tau_s
 
 
@@ -46,6 +51,8 @@ def recover_command_timings(log_path: Union[str, Path]) -> list[CommandTiming]:
     duration = (toolResult message timestamp) - (issuing assistant timestamp),
     using epoch-ms ``timestamp`` fields on ``message_end`` events. An assistant
     message with no ``toolCall`` is skipped (no command was issued).
+    If an assistant message contains multiple toolCalls, only the first is
+    attributed; parallel calls are not modelled.
     """
     timings: list[CommandTiming] = []
     pending: Optional[tuple[int, str]] = None  # (assistant_ts_ms, tool_name)
@@ -63,10 +70,10 @@ def recover_command_timings(log_path: Union[str, Path]) -> list[CommandTiming]:
             if role == "assistant":
                 tools = [c.get("name") for c in msg.get("content", [])
                          if c.get("type") == "toolCall"]
-                pending = (ts, tools[0]) if (ts and tools) else None
+                pending = (ts, tools[0]) if (ts is not None and tools) else None
             elif role == "toolResult" and pending is not None:
                 a_ts, tool = pending
-                if a_ts and ts:
+                if a_ts is not None and ts is not None:
                     timings.append(CommandTiming(tool, (ts - a_ts) / 1000.0))
                 pending = None
     return timings

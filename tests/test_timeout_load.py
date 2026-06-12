@@ -2,10 +2,14 @@
 """Unit tests for the command-timeout-under-load helpers."""
 from __future__ import annotations
 
+import json
 import math
 
+import pytest
+
 from benchmaker.swebench.timeout_load import (
-    effective_tau, task_survives, would_time_out,
+    CommandTiming, CurvePoint, accuracy_curve, effective_tau,
+    recover_command_timings, task_survives, would_time_out,
 )
 
 
@@ -15,7 +19,6 @@ def test_effective_tau():
 
 
 def test_effective_tau_rejects_nonpositive_load():
-    import pytest
     with pytest.raises(ValueError):
         effective_tau(600, 0)
 
@@ -30,12 +33,6 @@ def test_task_survives_uses_max_within_budget():
     assert task_survives(5.0, 5.0) is True
     assert task_survives(5.1, 5.0) is False
     assert task_survives(50.0, math.inf) is True
-
-
-# append to tests/test_timeout_load.py
-import json
-
-from benchmaker.swebench.timeout_load import CommandTiming, recover_command_timings
 
 
 def _log(tmp_path, rows):
@@ -75,9 +72,6 @@ def test_recover_ignores_assistant_without_toolcall(tmp_path):
     assert recover_command_timings(_log(tmp_path, rows)) == []
 
 
-from benchmaker.swebench.timeout_load import CurvePoint, accuracy_curve
-
-
 def test_accuracy_curve_strict_and_monotonic():
     # (reward, max_duration_s) per task
     tasks = [(1.0, 1.0), (1.0, 8.0), (0.0, 2.0), (1.0, 50.0)]
@@ -95,3 +89,24 @@ def test_accuracy_curve_point_fields():
     pts = accuracy_curve([(1.0, 3.0), (0.0, 3.0)], [2.0])
     assert pts == [CurvePoint(tau_s=2.0, n_survive=0, n_solved=0,
                               accuracy=0.0, n_broken=2)]
+
+
+def test_effective_tau_rejects_negative_timeout():
+    with pytest.raises(ValueError):
+        effective_tau(-1, 1)
+
+
+def test_recover_drops_first_when_two_assistants_without_result(tmp_path):
+    # Two assistant tool calls with no intervening toolResult: the first is
+    # overwritten, so only the second pairs with the result.
+    rows = [
+        {"type": "message_end",
+         "message": {"role": "assistant", "timestamp": 1000,
+                     "content": [{"type": "toolCall", "name": "bash"}]}},
+        {"type": "message_end",
+         "message": {"role": "assistant", "timestamp": 2000,
+                     "content": [{"type": "toolCall", "name": "read"}]}},
+        {"type": "message_end",
+         "message": {"role": "toolResult", "timestamp": 2500, "content": []}},
+    ]
+    assert recover_command_timings(_log(tmp_path, rows)) == [CommandTiming("read", 0.5)]
