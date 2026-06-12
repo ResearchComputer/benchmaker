@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Iterable
 
 
 def effective_tau(timeout_s: float, load_factor: float) -> float:
@@ -45,7 +45,7 @@ class CommandTiming:
     duration_s: float
 
 
-def recover_command_timings(log_path: Union[str, Path]) -> list[CommandTiming]:
+def recover_command_timings(log_path: str | Path) -> list[CommandTiming]:
     """Per-command wall-times from a pi-container agent log (JSONL).
 
     duration = (toolResult message timestamp) - (issuing assistant timestamp),
@@ -55,7 +55,7 @@ def recover_command_timings(log_path: Union[str, Path]) -> list[CommandTiming]:
     attributed; parallel calls are not modelled.
     """
     timings: list[CommandTiming] = []
-    pending: Optional[tuple[int, str]] = None  # (assistant_ts_ms, tool_name)
+    pending: tuple[int, str] | None = None  # (assistant_ts_ms, tool_name)
     with open(log_path) as f:
         for line in f:
             line = line.strip()

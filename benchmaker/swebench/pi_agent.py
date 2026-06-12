@@ -534,8 +534,11 @@ class _ExecBridge:
                     return web.json_response({
                         "return_code": -1,
                         "stdout": "",
-                        "stderr": (f"command timed out after {int(self._inject_timeout_s)}s "
-                                   f"(injected load_factor={self._load_factor:g})"),
+                        "stderr": (
+                            f"command timed out after "
+                            f"{self._inject_timeout_s / self._load_factor:.1f}s "
+                            f"(injected load_factor={self._load_factor:g}, "
+                            f"T={int(self._inject_timeout_s)}s)"),
                     })
                 self._emit_span(start, rc)
                 return web.json_response({
