@@ -25,3 +25,23 @@ def test_injection_uses_inject_timeout_override():
     b = _bridge(load_factor=2.0, inject_timeout_s=10.0)  # tau = 5s
     assert b._should_inject_timeout(4.9) is False
     assert b._should_inject_timeout(5.1) is True
+
+
+def _bridge_from_env():
+    return P._ExecBridge(None, cwd="/testbed", exec_timeout_s=600.0)
+
+
+def test_env_var_path_sets_load_factor(monkeypatch):
+    monkeypatch.setenv("BENCH_LOAD_FACTOR", "10")
+    monkeypatch.setenv("BENCH_INJECT_TIMEOUT_S", "100")
+    b = _bridge_from_env()  # construct with no explicit load_factor/inject_timeout_s
+    assert b._load_factor == 10.0
+    assert b._inject_timeout_s == 100.0
+    assert b._should_inject_timeout(11.0) is True   # 11 > 100/10 = 10
+    assert b._should_inject_timeout(9.0) is False
+
+
+def test_env_var_zero_load_factor_is_noop(monkeypatch):
+    monkeypatch.setenv("BENCH_LOAD_FACTOR", "0")
+    b = _bridge_from_env()
+    assert b._should_inject_timeout(10_000.0) is False  # load_factor <= 1 is a strict no-op

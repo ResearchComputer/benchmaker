@@ -501,7 +501,7 @@ class _ExecBridge:
         if load_factor is None:
             load_factor = float(os.environ.get("BENCH_LOAD_FACTOR", "1") or "1")
         if inject_timeout_s is None:
-            inject_timeout_s = float(os.environ.get("BENCH_TIMEOUT_S", "0") or "0") \
+            inject_timeout_s = float(os.environ.get("BENCH_INJECT_TIMEOUT_S", "0") or "0") \
                 or float(exec_timeout_s)
         self._load_factor = float(load_factor)
         self._inject_timeout_s = float(inject_timeout_s)
@@ -524,6 +524,10 @@ class _ExecBridge:
             try:
                 res = await self._env.exec(command=full, cwd=self._cwd, timeout_sec=timeout)
                 rc = int(res.return_code)
+                # elapsed ≈ uncontended command duration (the bridge is meant to run
+                # at low real concurrency). Injection simulates load by cutting the
+                # budget to inject_timeout_s / load_factor; a command whose real
+                # duration exceeds that budget is reported as a timeout.
                 elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                 if self._should_inject_timeout(elapsed):
                     self._emit_span(start, -1)
