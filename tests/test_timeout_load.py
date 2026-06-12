@@ -30,3 +30,46 @@ def test_task_survives_uses_max_within_budget():
     assert task_survives(5.0, 5.0) is True
     assert task_survives(5.1, 5.0) is False
     assert task_survives(50.0, math.inf) is True
+
+
+# append to tests/test_timeout_load.py
+import json
+
+from benchmaker.swebench.timeout_load import CommandTiming, recover_command_timings
+
+
+def _log(tmp_path, rows):
+    p = tmp_path / "pi-container.log"
+    with open(p, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    return p
+
+
+def test_recover_command_timings(tmp_path):
+    rows = [
+        {"type": "message_start", "message": {"role": "user", "content": []}},
+        {"type": "message_end",
+         "message": {"role": "assistant", "timestamp": 1000,
+                     "content": [{"type": "toolCall", "name": "bash"}]}},
+        {"type": "message_end",
+         "message": {"role": "toolResult", "timestamp": 3500, "content": []}},
+        {"type": "message_end",
+         "message": {"role": "assistant", "timestamp": 4000,
+                     "content": [{"type": "toolCall", "name": "read"}]}},
+        {"type": "message_end",
+         "message": {"role": "toolResult", "timestamp": 4010, "content": []}},
+    ]
+    timings = recover_command_timings(_log(tmp_path, rows))
+    assert timings == [CommandTiming("bash", 2.5), CommandTiming("read", 0.01)]
+
+
+def test_recover_ignores_assistant_without_toolcall(tmp_path):
+    rows = [
+        {"type": "message_end",
+         "message": {"role": "assistant", "timestamp": 1000,
+                     "content": [{"type": "text", "text": "thinking"}]}},
+        {"type": "message_end",
+         "message": {"role": "toolResult", "timestamp": 9000, "content": []}},
+    ]
+    assert recover_command_timings(_log(tmp_path, rows)) == []
