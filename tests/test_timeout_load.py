@@ -73,3 +73,25 @@ def test_recover_ignores_assistant_without_toolcall(tmp_path):
          "message": {"role": "toolResult", "timestamp": 9000, "content": []}},
     ]
     assert recover_command_timings(_log(tmp_path, rows)) == []
+
+
+from benchmaker.swebench.timeout_load import CurvePoint, accuracy_curve
+
+
+def test_accuracy_curve_strict_and_monotonic():
+    # (reward, max_duration_s) per task
+    tasks = [(1.0, 1.0), (1.0, 8.0), (0.0, 2.0), (1.0, 50.0)]
+    pts = {p.tau_s: p for p in accuracy_curve(tasks, [math.inf, 10, 5, 0.5])}
+    assert pts[math.inf].n_solved == 3 and pts[math.inf].n_broken == 0
+    assert pts[10].n_solved == 2   # 50s task broken
+    assert pts[5].n_solved == 1    # 8s and 50s broken
+    assert pts[0.5].n_solved == 0  # all broken
+    # accuracy is non-increasing as tau shrinks
+    accs = [pts[t].accuracy for t in [math.inf, 10, 5, 0.5]]
+    assert accs == sorted(accs, reverse=True)
+
+
+def test_accuracy_curve_point_fields():
+    pts = accuracy_curve([(1.0, 3.0), (0.0, 3.0)], [2.0])
+    assert pts == [CurvePoint(tau_s=2.0, n_survive=0, n_solved=0,
+                              accuracy=0.0, n_broken=2)]
