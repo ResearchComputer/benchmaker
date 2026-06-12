@@ -17,6 +17,7 @@ import glob
 import json
 import math
 import os
+import sys
 
 from benchmaker.swebench.timeout_load import accuracy_curve, recover_command_timings
 
@@ -36,8 +37,13 @@ def collect_tasks(jobs_dir: str) -> list[tuple[float, float, str]]:
         name = os.path.basename(tdir).rsplit("__", 1)[0]
         timings = recover_command_timings(lp)
         max_d = max((c.duration_s for c in timings), default=0.0)
-        with open(rj) as f:
-            reward = (json.load(f).get("verifier_result") or {}).get("rewards", {}).get("reward")
+        try:
+            with open(rj) as f:
+                result_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            print(f"warning: skipping {tdir} (unreadable result.json)", file=sys.stderr)
+            continue
+        reward = (result_data.get("verifier_result") or {}).get("rewards", {}).get("reward")
         tasks.append((float(reward or 0.0), max_d, name))
     return tasks
 
@@ -86,7 +92,13 @@ def main() -> int:
                 w.writerow([p.tau_s, _load_factor(a.timeout, p.tau_s),
                             p.n_survive, p.n_solved, p.accuracy, p.n_broken])
         with open(a.out + ".json", "w") as f:
-            json.dump([p.__dict__ for p in curve], f, indent=2, default=str)
+            rows = []
+            for p in curve:
+                row = dict(p.__dict__)
+                if math.isinf(row["tau_s"]):
+                    row["tau_s"] = "inf"
+                rows.append(row)
+            json.dump(rows, f, indent=2)
         print(f"wrote {a.out}.csv and {a.out}.json")
 
     if a.plot:

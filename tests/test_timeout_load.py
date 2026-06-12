@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import importlib.util as _ilu
 import json
 import math
 import os
@@ -134,3 +135,43 @@ def test_curve_on_real_c1_is_monotonic_and_baseline_matches():
     accs = [p.accuracy for p in pts]
     assert accs == sorted(accs, reverse=True)                       # monotonic
     assert pts[0].n_solved == sum(1 for r, _ in tasks if r == 1.0)  # baseline = recorded solved
+
+
+def _load_cli():
+    spec = _ilu.spec_from_file_location(
+        "analyze_timeout_curve", "scripts/analyze_timeout_curve.py")
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_task_dir(root, name, *, reward, rows, bad_json=False, with_result=True):
+    tdir = root / name
+    (tdir / "agent").mkdir(parents=True)
+    with open(tdir / "agent" / "pi-container.log", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    if with_result:
+        if bad_json:
+            (tdir / "result.json").write_text("{not valid json")
+        else:
+            (tdir / "result.json").write_text(json.dumps(
+                {"verifier_result": {"rewards": {"reward": reward}}}))
+    return tdir
+
+
+def test_collect_tasks_skips_missing_and_malformed(tmp_path):
+    cli = _load_cli()
+    rows = [
+        {"type": "message_end",
+         "message": {"role": "assistant", "timestamp": 1000,
+                     "content": [{"type": "toolCall", "name": "bash"}]}},
+        {"type": "message_end",
+         "message": {"role": "toolResult", "timestamp": 3500, "content": []}},
+    ]
+    _make_task_dir(tmp_path, "good__aaa", reward=1.0, rows=rows)
+    _make_task_dir(tmp_path, "noresult__bbb", reward=0.0, rows=rows, with_result=False)
+    _make_task_dir(tmp_path, "badjson__ccc", reward=0.0, rows=rows, bad_json=True)
+    tasks = cli.collect_tasks(str(tmp_path))
+    # only the well-formed task survives; name is the part before "__"
+    assert tasks == [(1.0, 2.5, "good")]
