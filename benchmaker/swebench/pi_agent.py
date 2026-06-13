@@ -27,9 +27,9 @@ endpoint + key come from harbor's ``AgentConfig.env`` (``OPENAI_API_BASE_URL`` /
 ``OPENAI_API_KEY``) or the host environment, exactly like the other agents here.
 
 Runtime requirements / things to verify against your pi build (marked NOTE
-below): the exact non-interactive/auto-approve flag for ``--mode json``, the
-extension auto-load path, and that the environment pods have network egress to
-npm + the model endpoint.
+below): the extension auto-load path, and that the environment pods have network
+egress to npm + the model endpoint. (``--mode json`` runs tools with no
+approve flag on current pi; see :func:`pi_command`.)
 """
 
 from __future__ import annotations
@@ -69,10 +69,17 @@ WORKDIR = "/testbed"
 # PI_CODING_AGENT_DIR (config.getAgentDir honors it) makes write and read agree.
 PI_AGENT_DIR = "/tmp/pi-agent"
 
-# This file lives at benchmaker/swebench/pi_agent.py; the JS extension ships
+# This file lives at benchmaker/swebench/pi_agent.py; the JS extensions ship
 # alongside it under pi_ext/.
 _EXT_DIR = Path(__file__).resolve().parent / "pi_ext"
+# Host-mode bash override (routes pi's `bash` tool into the environment).
 REMOTE_EXEC_EXT = _EXT_DIR / "remote_exec.js"
+# Host-mode all-tools override (routes bash + read + write + edit). Opt-in via
+# the ``route_tools=all`` kwarg, for tool-parity host-vs-container experiments.
+REMOTE_EXEC_ALL_EXT = _EXT_DIR / "remote_exec_all.js"
+# Host-mode provider registration from env (robust alternative to staging a
+# models.json that pi may not find — see PiHostAgent / register_provider.js).
+REGISTER_PROVIDER_EXT = _EXT_DIR / "register_provider.js"
 # Turn-cap extension (reads PI_MAX_TURNS, aborts the agent loop at the cap).
 MAX_TURNS_EXT = _EXT_DIR / "max_turns.js"
 # In container mode we stage it OUTSIDE PI_CODING_AGENT_DIR and load it with an
@@ -201,10 +208,11 @@ def pi_command(
 ) -> str:
     """The ``pi`` invocation (prompt passed via file to survive multiline text).
 
-    NOTE: ``--mode json`` is the headless JSONL mode. If your pi build still
-    gates tool execution behind a permission prompt, pass the appropriate
-    auto-approve flag through ``pi_extra_args`` (e.g. ``--yolo``); it is appended
-    here verbatim.
+    NOTE: ``--mode json`` is the headless JSONL mode and on current pi
+    (verified 0.79.x) executes tools **without any approve flag** — do not pass
+    one. pi has no ``-a``/``--yolo`` option; passing it makes pi exit instantly
+    with ``Error: Unknown option``. ``pi_extra_args`` remains a generic escape
+    hatch for other flags and is appended verbatim.
     """
     args = ["pi", "--mode", "json", "--provider", provider, "--model", model]
     args += list(extra_args or [])
@@ -387,17 +395,39 @@ class PiContainerAgent(_PiAgentBase):
 
 
 class PiHostAgent(_PiAgentBase):
-    """Run pi on the host; route its ``bash`` tool into the environment via a bridge."""
+    """Run pi on the host; route its tools into the environment via a bridge.
+
+    By default only ``bash`` is routed (file tools disabled so pi never touches
+    the host fs). ``route_tools="all"`` also routes ``read``/``write``/``edit``
+    through the same bridge for a tool-identical comparison against ``--agent pi``.
+    """
 
     def __init__(self, *args: Any, bridge_host: str = "127.0.0.1",
-                 exec_timeout_s: float = 600.0, **kwargs: Any):
+                 exec_timeout_s: float = 600.0, route_tools: str = "bash",
+                 **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._bridge_host = bridge_host
         self._exec_timeout_s = float(exec_timeout_s)
+        # Which of pi's core tools to route into the environment:
+        #   "bash" (default) — only the bash tool, file tools disabled (pi never
+        #     touches the host fs). This is the safe, original host-loop mode.
+        #   "all"            — bash + read + write + edit, all routed through the
+        #     same bridge, so a host-loop run has the same four tools a
+        #     container-loop run gets (its builtins). For tool-parity S1/S2
+        #     comparisons. Still never touches the host fs (file ops are shell
+        #     commands sent into the environment). May arrive as a string via
+        #     --agent-kwarg.
+        self._route_tools = str(route_tools or "bash").strip().lower()
 
     @staticmethod
     def name() -> str:
         return "pi-host"
+
+    def _host_tool_names(self) -> list[str]:
+        """The pi tools to allow + route, per the ``route_tools`` setting."""
+        if self._route_tools == "all":
+            return ["bash", "read", "write", "edit"]
+        return ["bash"]
 
     async def run(self, instruction: str, environment: BaseEnvironment,
                   context: AgentContext) -> None:
@@ -425,6 +455,14 @@ class PiHostAgent(_PiAgentBase):
                 "OPENAI_API_KEY": api_key,
                 "PI_EXEC_BRIDGE": bridge.url,
                 "PI_EXEC_CWD": self._cwd,
+                # Consumed by register_provider.js to register our provider from
+                # env (robust to pi not finding the staged models.json). The key
+                # stays a $-ref the extension resolves at request time.
+                "PI_BENCH_PROVIDER": self._provider,
+                "PI_BENCH_BASE_URL": base_url,
+                "PI_BENCH_MODEL": model,
+                "PI_BENCH_CONTEXT_WINDOW": str(self._context_window),
+                "PI_BENCH_MAX_TOKENS": str(self._max_tokens),
             }
             if self._pi_max_turns > 0:
                 env["PI_MAX_TURNS"] = str(self._pi_max_turns)
@@ -445,28 +483,44 @@ class PiHostAgent(_PiAgentBase):
         finally:
             await bridge.stop()
         context.metadata = {"exit_status": exit_status, "mode": "host",
+                            "route_tools": self._route_tools,
                             "exec_count": bridge.count}
 
     def _stage_host_config(self, home: Path, base_url: str, model: str) -> None:
         agent_dir = home / ".pi" / "agent"
-        (agent_dir / "extensions").mkdir(parents=True, exist_ok=True)
+        extensions_dir = agent_dir / "extensions"
+        extensions_dir.mkdir(parents=True, exist_ok=True)
+        # Belt-and-suspenders: stage a models.json too. register_provider.js is
+        # the primary, filesystem-independent path (see its docstring); this
+        # stays as a fallback for pi builds that find it / lack registerProvider.
         (agent_dir / "models.json").write_text(
             models_json(base_url, model, provider=self._provider,
                         context_window=self._context_window, max_tokens=self._max_tokens)
         )
-        # Force every file/shell action through the (overridden) bash tool so it
-        # lands in the environment, never the host fs.  NOTE: verify your pi
-        # build honors a "tools" allowlist in settings.json.
+        # Restrict pi to the tools we route into the environment, so file/shell
+        # actions land in the pod and never the host fs. With route_tools="all"
+        # this allows read/write/edit too (they are routed by remote_exec_all.js).
+        # NOTE: verify your pi build honors a "tools" allowlist in settings.json.
+        tool_names = self._host_tool_names()
         (agent_dir / "settings.json").write_text(json.dumps(
             {"defaultProvider": self._provider, "defaultModel": model,
-             "tools": ["bash"]}, indent=2))
-        # Auto-loaded extension: replaces `bash` with a remote executor.
-        if REMOTE_EXEC_EXT.exists():
-            (agent_dir / "extensions" / "remote_exec.js").write_text(
+             "tools": tool_names}, indent=2))
+        # Register our provider from env, robust to pi not finding models.json.
+        if REGISTER_PROVIDER_EXT.exists():
+            (extensions_dir / "register_provider.js").write_text(
+                REGISTER_PROVIDER_EXT.read_text())
+        # Auto-loaded exec extension. Load exactly one bash-registering extension:
+        # the all-tools variant when routing read/write/edit, else the bash-only
+        # one (loading both would double-register `bash`).
+        if self._route_tools == "all" and REMOTE_EXEC_ALL_EXT.exists():
+            (extensions_dir / "remote_exec_all.js").write_text(
+                REMOTE_EXEC_ALL_EXT.read_text())
+        elif REMOTE_EXEC_EXT.exists():
+            (extensions_dir / "remote_exec.js").write_text(
                 REMOTE_EXEC_EXT.read_text())
         # Auto-loaded turn-cap extension (no-op unless PI_MAX_TURNS is set in env).
         if self._pi_max_turns > 0 and MAX_TURNS_EXT.exists():
-            (agent_dir / "extensions" / "max_turns.js").write_text(
+            (extensions_dir / "max_turns.js").write_text(
                 MAX_TURNS_EXT.read_text())
 
     def _write_log(self, tag: str, text: str) -> None:

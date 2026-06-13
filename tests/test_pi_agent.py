@@ -6,7 +6,10 @@ harbor environment are not exercised here.
 """
 
 import json
+import shutil
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -103,6 +106,88 @@ def test_max_turns_extension_file_present_and_shaped():
     assert P.MAX_TURNS_EXT.exists()
     txt = P.MAX_TURNS_EXT.read_text()
     assert "PI_MAX_TURNS" in txt and "turn_end" in txt and "export default" in txt
+
+
+# --------------------------- approve-flag NOTE (#1) ------------------------ #
+
+def test_pi_command_note_does_not_recommend_an_approve_flag():
+    # Issue #6 (1): current pi --mode json runs tools with no approve flag, and
+    # -a/--yolo make it exit with "Unknown option". The NOTE must say so and must
+    # no longer recommend passing one.
+    doc = (P.pi_command.__doc__ or "").lower()
+    assert "without any approve flag" in doc
+    assert "unknown option" in doc
+    assert "pass the appropriate" not in doc  # the old recommendation is gone
+
+
+# --------------------------- pi-host tool routing (#3) --------------------- #
+
+def test_pi_host_route_tools_names_and_coercion(tmp_path):
+    mk = lambda **kw: P.PiHostAgent(logs_dir=tmp_path, model_name="m", **kw)
+    assert mk()._host_tool_names() == ["bash"]                       # default
+    assert mk(route_tools="all")._host_tool_names() == ["bash", "read", "write", "edit"]
+    assert mk(route_tools=" ALL ")._host_tool_names() == ["bash", "read", "write", "edit"]
+    assert mk(route_tools="")._host_tool_names() == ["bash"]         # empty -> default
+    assert mk(route_tools="bash")._host_tool_names() == ["bash"]
+
+
+def test_pi_host_stage_default_routes_bash_only(tmp_path):
+    agent = P.PiHostAgent(logs_dir=tmp_path, model_name="m")
+    home = tmp_path / "h"
+    agent._stage_host_config(home, "http://h/v1", "m")
+    ad = home / ".pi" / "agent"
+    settings = json.loads((ad / "settings.json").read_text())
+    assert settings["tools"] == ["bash"]
+    assert settings["defaultProvider"] == "bench" and settings["defaultModel"] == "m"
+    exts = {p.name for p in (ad / "extensions").iterdir()}
+    assert "remote_exec.js" in exts and "remote_exec_all.js" not in exts
+    assert "register_provider.js" in exts          # provider registration (#2)
+    assert (ad / "models.json").exists()           # fallback still staged
+
+
+def test_pi_host_stage_all_routes_four_tools(tmp_path):
+    agent = P.PiHostAgent(logs_dir=tmp_path, model_name="m", route_tools="all")
+    home = tmp_path / "h"
+    agent._stage_host_config(home, "http://h/v1", "m")
+    ad = home / ".pi" / "agent"
+    settings = json.loads((ad / "settings.json").read_text())
+    assert settings["tools"] == ["bash", "read", "write", "edit"]
+    exts = {p.name for p in (ad / "extensions").iterdir()}
+    # exactly one bash-registering extension (loading both double-registers bash)
+    assert "remote_exec_all.js" in exts and "remote_exec.js" not in exts
+    assert "register_provider.js" in exts
+
+
+def test_host_extensions_present_and_shaped():
+    # provider-registration extension (#2)
+    assert P.REGISTER_PROVIDER_EXT.exists()
+    rp = P.REGISTER_PROVIDER_EXT.read_text()
+    assert "registerProvider" in rp and "openai-completions" in rp
+    assert "$OPENAI_API_KEY" in rp and "PI_BENCH_PROVIDER" in rp
+    # all-tools routing extension (#3)
+    assert P.REMOTE_EXEC_ALL_EXT.exists()
+    ea = P.REMOTE_EXEC_ALL_EXT.read_text()
+    for name in ('name: "bash"', 'name: "read"', 'name: "write"', 'name: "edit"'):
+        assert name in ea
+    # canonical pi tool-result shape (content/details), not legacy {output,exitCode}
+    assert "content:" in ea and "details:" in ea
+
+
+def test_remote_exec_uses_canonical_result_shape():
+    txt = P.REMOTE_EXEC_EXT.read_text()
+    assert "content:" in txt and "details:" in txt
+
+
+def test_pi_ext_node_smoke():
+    """Functionally exercise the JS extensions through a real shell round-trip."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    harness = Path(__file__).resolve().parent / "pi_ext_smoke.mjs"
+    ext_dir = Path(P.__file__).resolve().parent / "pi_ext"
+    res = subprocess.run([node, str(harness), str(ext_dir)],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, (res.stdout or "") + (res.stderr or "")
 
 
 # --------------------------- exec bridge (Mode 2 crux) --------------------- #
