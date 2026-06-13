@@ -38,9 +38,13 @@ export default function (pi) {
         (res.stdout || "") +
         (res.stderr ? (res.stdout ? "\n" : "") + res.stderr : "");
       const rc = typeof res.return_code === "number" ? res.return_code : 0;
+      // Canonical pi tool-result shape: { content: [...], details }. (Earlier
+      // builds tolerated a bare { output, exitCode }; the documented contract
+      // — see examples/extensions/tool-override.ts — is content/details, so the
+      // model reliably sees the command output regardless of pi version.)
       return {
-        output: `returncode: ${rc}\n${out}`,
-        exitCode: rc,
+        content: [{ type: "text", text: `returncode: ${rc}\n${out}` }],
+        details: { exitCode: rc },
       };
     },
   });

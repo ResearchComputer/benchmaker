@@ -111,11 +111,13 @@ Useful `--agent-kwarg key=value` (repeatable):
 
 | Kwarg | Applies to | Meaning |
 | ----- | ---------- | ------- |
-| `pi_extra_args` | both | extra pi CLI flags (e.g. a non-interactive/auto-approve flag) |
+| `pi_extra_args` | both | extra pi CLI flags (generic escape hatch; **no approve flag needed** — see below) |
 | `total_wall_s` | both | hard wall-clock cap on the pi run |
-| `context_window` / `max_tokens` | both | the `models.json` model limits |
+| `context_window` / `max_tokens` | both | the model limits (`models.json` + provider registration) |
+| `pi_max_turns` | both | cap pi's agentic turns (0 = uncapped) |
 | `install_script` | `pi` | override the in-container Node + pi install |
 | `exec_timeout_s` | `pi-host` | per-command timeout on the bridge |
+| `route_tools` | `pi-host` | `bash` (default) or `all` — route `read`/`write`/`edit` too (see below) |
 
 ## Setup
 
@@ -130,6 +132,31 @@ uv pip install --python .venv/bin/python -e /pub/scratch/xiayao/research/flash-s
 `OPENAI_API_KEY`, and `FLASH_SANDBOX_URL` (`harbor_eval` loads `.env`
 automatically).
 
+## Tool parity: `pi-host` with all tools routed
+
+`pi-host` defaults to routing **only** `bash` into the environment; pi's
+`read`/`write`/`edit` file tools are disabled (they would hit the *host*
+filesystem). That keeps the host loop safe, but it means a `pi` (container, four
+builtins) vs `pi-host` run is not tool-identical.
+
+`--agent-kwarg route_tools=all` closes that gap: it loads
+`pi_ext/remote_exec_all.js` (instead of the bash-only `remote_exec.js`) and
+widens the `settings.json` `tools` allowlist to `["bash","read","write","edit"]`.
+All four tools are then routed through the **same** localhost bridge —
+`read` = `cat`/`sed`, `write` = base64-decode, `edit` = read-modify-write of
+exact-text replacements — so every file action still lands in `/testbed`, never
+the host fs. This enables a tool-identical channel-split comparison (agent in the
+sandbox vs agent on the host, same four tools) where the only variable is loop
+location:
+
+```bash
+# S1: agent inside the sandbox (four builtin tools)
+python -m benchmaker.swebench.harbor_eval --agent pi --n-tasks 1
+# S2: agent on the host, all four tools routed in
+python -m benchmaker.swebench.harbor_eval --agent pi-host \
+    --agent-kwarg route_tools=all --n-tasks 1
+```
+
 ## Grading & output
 
 harbor's verifier grades the post-run `/testbed` (applies the hidden
@@ -142,9 +169,10 @@ directory under `jobs/<job_name>/`.
 These were left unspecified by the pi docs, so they're exposed as knobs rather
 than hard-coded — verify them against your installed pi build on the first run:
 
-- **Tool auto-approval.** `--mode json` is headless; if your pi build still
-  gates tool calls, pass the auto-approve flag via `pi_extra_args` (e.g.
-  `--agent-kwarg pi_extra_args=--yolo`).
+- **Tool auto-approval.** `--mode json` is headless and (verified on pi 0.79.x)
+  runs tools with **no approve flag** — do not pass one. pi has no `-a`/`--yolo`
+  option; passing it makes pi exit immediately with `Error: Unknown option`.
+  `pi_extra_args` stays as a generic escape hatch for other flags.
 - **Secret templating.** harbor rewrites sensitive `AgentConfig.env` values
   (e.g. `OPENAI_API_KEY`) to `${OPENAI_API_KEY}` placeholders for safe
   persistence; harbor's `AgentFactory` and our `resolve_model` expand them via
@@ -157,15 +185,27 @@ than hard-coded — verify them against your installed pi build on the first run
   reachable from the pod (verified: in-pod `curl` with the key returns 200). The
   sandbox is deleted after the trial, so the key does not linger. Host mode keeps
   the `$OPENAI_API_KEY` ref (resolves fine from the host process env).
+- **Provider registration (host mode).** Rather than depend on pi finding a
+  staged `models.json` (its config dir comes from Node's `os.homedir()`, which can
+  disagree with the path we stage into → `Unknown provider "bench"`), host mode
+  also loads `pi_ext/register_provider.js`, which reads the endpoint/model from
+  `PI_BENCH_*` env and calls `pi.registerProvider(...)` directly. The `models.json`
+  is still staged as a fallback. The api key stays a `$OPENAI_API_KEY` ref that pi
+  resolves from the environment at request time.
 - **Config dir.** Both modes pin `PI_CODING_AGENT_DIR` to an explicit path
   (`/tmp/pi-agent` in-container; the per-run temp `HOME/.pi/agent` on the host)
   rather than letting pi derive `~/.pi/agent` from `$HOME` — bash's `$HOME` at
   staging time and Node's `os.homedir()` at runtime can disagree inside the
-  environment, which otherwise hides `models.json` (→ `Unknown provider "bench"`).
-- **Extension auto-load (host mode).** `remote_exec.js` is written to
-  `$PI_CODING_AGENT_DIR/extensions/` (under a per-run temp `HOME`); confirm pi loads it.
-- **JS tool return shape (host mode).** `remote_exec.js`'s `execute()` returns
-  `{output, exitCode}`; older pi builds may expect a bare string.
+  environment, which otherwise hides `models.json` (the container-mode failure
+  mode `register_provider.js` sidesteps for the host).
+- **Extension auto-load (host mode).** Extensions (`register_provider.js`, one of
+  `remote_exec.js` / `remote_exec_all.js`, and optionally `max_turns.js`) are
+  written to `$PI_CODING_AGENT_DIR/extensions/` (under a per-run temp `HOME`);
+  confirm pi loads them.
+- **JS tool return shape (host mode).** The routed tools return pi's canonical
+  `{ content: [{ type: "text", text }], details }` shape (per
+  `examples/extensions/tool-override.ts` in the pi package), so the model reliably
+  sees tool output across pi versions.
 - **Network egress.** In-container mode installs Node at runtime, so the pods
   need egress to npm + the model endpoint. To skip the per-instance install,
   bake a Node + pi image layer (see [`tools/swe_images`](../tools/swe_images/)).
