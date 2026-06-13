@@ -438,7 +438,10 @@ class PiHostAgent(_PiAgentBase):
                              exec_timeout_s=self._exec_timeout_s, host=self._bridge_host,
                              spans_path=Path(self.logs_dir) / "timeline-spans.jsonl")
         await bridge.start()
-        home = Path(self.logs_dir) / "pi-home"
+        # Absolute: pi runs with cwd=home, and prompt_path / PI_CODING_AGENT_DIR
+        # are passed verbatim — a relative logs_dir would double-resolve against
+        # cwd (→ task.txt / extensions "not found" → Unknown provider).
+        home = (Path(self.logs_dir) / "pi-home").resolve()
         try:
             self._stage_host_config(home, base_url, model)
             prompt_path = home / "task.txt"
