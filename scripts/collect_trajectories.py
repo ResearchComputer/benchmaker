@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Collect **graded pi trajectories** on SWE-bench in two execution modes.
+
+This runs **pi** (`@earendil-works/pi-coding-agent`) on SWE-bench via harbor and
+then produces one consolidated JSONL where every recorded trajectory carries its
+harbor verifier grade. Two modes (the two harbor agents in
+``benchmaker.swebench.pi_agent``):
+
+* ``pi-host``      — pi runs on the host; its ``bash``/``read``/``write``/``edit``
+  tools are routed into the per-instance environment (``/testbed``) via the
+  localhost bridge. Defaults to routing **all** four tools (``--route-tools all``)
+  so a host run is tool-identical to a container run.
+* ``pi-container`` — pi runs entirely inside the per-instance environment.
+
+The script has two responsibilities, cleanly split:
+
+1. **run** — shell out to ``benchmaker.swebench.harbor_eval`` with the chosen
+   ``--agent`` (the ``run_pi_experiment.py`` convention). harbor owns environment
+   provisioning, agent execution, and grading. Unrecognised flags pass through
+   verbatim to ``harbor_eval``.
+2. **collect** — :func:`collect_from_job_dir`, a pure function that walks the
+   resulting job dir and fuses each trial's parsed trajectory
+   (``trajectory.parse_pi_conversation``) with its grade
+   (``verifier/reward.txt`` + ``verifier/report.json``).
+
+The grading fields are *additive* keys on top of ``Trajectory.to_dict()``, so the
+output stays a valid replay store (``trajectory.load_store`` ignores them).
+
+Examples::
+
+    # run pi on the host (all tools routed), 5 tasks, then collect graded trajectories
+    FLASH_SANDBOX_URL=http://localhost:8080 \\
+        scripts/collect_trajectories.py --mode pi-host --n-tasks 5
+
+    # pi in-container; forward an extra harbor_eval flag verbatim
+    scripts/collect_trajectories.py --mode pi-container --n-tasks 5 -- --force-build
+
+    # re-fuse an already-collected job dir (no re-run)
+    scripts/collect_trajectories.py --collect-only jobs/pi-host-20260614T101500Z
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath
+from typing import Any, Optional
+
+from benchmaker.env import load_dotenv
+from benchmaker.swebench.trajectory import parse_pi_conversation
+
+# Repo root: scripts/<this file> -> ../
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+log = logging.getLogger("benchmaker.collect_trajectories")
+
+# pi writes the same `--mode json` event stream under one of these per-trial
+# agent logs; which one tells us the execution mode.
+_LOG_NAMES = (("pi-container.log", "pi-container"), ("pi-host.log", "pi-host"))
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+def _default_job_name(mode: str) -> str:
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{mode}-{stamp}"
+
+
+def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """Parse our flags; unknown flags become harbor_eval passthrough."""
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--mode", choices=["pi-host", "pi-container"],
+                   help="pi execution mode (required unless --collect-only).")
+    p.add_argument("--dataset", default="swebench-verified",
+                   help="Harbor dataset slug (default: swebench-verified).")
+    p.add_argument("--n-tasks", type=int, default=None, help="Cap dataset tasks.")
+    p.add_argument("--concurrency", type=int, default=None,
+                   help="Concurrent trials (default: harbor_eval's).")
+    p.add_argument("--model", default=os.environ.get("OPENAI_COMPATIBLE_MODEL")
+                   or os.environ.get("OPENAI_MODEL"),
+                   help="Model id. Default: $OPENAI_COMPATIBLE_MODEL / $OPENAI_MODEL.")
+    p.add_argument("--timeout-multiplier", type=float, default=4.0,
+                   help="Multiplier on harbor's timeouts (SWE-bench cold-start "
+                        "needs 4-6x).")
+    p.add_argument("--backend-type", default="docker", help="harbor backend type.")
+    p.add_argument("--route-tools", choices=["all", "bash"], default="all",
+                   help="pi-host only: route all four tools (default) or bash only.")
+    p.add_argument("--job-name", default=None,
+                   help="Job name (default: <mode>-<UTC stamp>).")
+    p.add_argument("--jobs-dir", default=None,
+                   help="Parent dir for the job bundle (default: harbor's 'jobs').")
+    p.add_argument("--out", default=None,
+                   help="Output JSONL (default: <job_dir>/pi-trajectories.jsonl).")
+    p.add_argument("--collect-only", default=None, metavar="JOB_DIR",
+                   help="Skip the run; fuse an existing job dir only.")
+    p.add_argument("--python", default=sys.executable,
+                   help="Interpreter used to launch harbor_eval.")
+    args, passthrough = p.parse_known_args(argv)
+    passthrough = [a for a in passthrough if a != "--"]
+    if args.job_name is None:
+        args.job_name = _default_job_name(args.mode or "pi")
+    return args, passthrough
+
+
+def build_harbor_argv(args: argparse.Namespace,
+                      passthrough: Optional[list[str]] = None) -> list[str]:
+    """The ``python -m ...`` argv (without the interpreter) for harbor_eval."""
+    argv = ["-m", "benchmaker.swebench.harbor_eval", "--agent", args.mode]
+    if args.mode == "pi-host":
+        argv += ["--agent-kwarg", f"route_tools={args.route_tools}"]
+    argv += ["--dataset", args.dataset]
+    if args.n_tasks is not None:
+        argv += ["--n-tasks", str(args.n_tasks)]
+    if args.concurrency is not None:
+        argv += ["--concurrency", str(args.concurrency)]
+    if args.model:
+        argv += ["--model", args.model]
+    argv += ["--timeout-multiplier", str(args.timeout_multiplier)]
+    argv += ["--backend-type", args.backend_type]
+    argv += ["--job-name", args.job_name]
+    if args.jobs_dir:
+        argv += ["--jobs-dir", str(args.jobs_dir)]
+    argv += list(passthrough or [])
+    return argv
+
+
+def _job_dir_for(args: argparse.Namespace) -> Path:
+    base = Path(args.jobs_dir) if args.jobs_dir else (REPO_ROOT / "jobs")
+    if not base.is_absolute():
+        base = REPO_ROOT / base
+    return base / args.job_name
+
+
+def run_job(args: argparse.Namespace, passthrough: list[str]) -> Path:
+    """Run harbor_eval in the chosen mode; return the (expected) job dir.
+
+    A nonzero harbor_eval exit is surfaced but not fatal — collection still runs
+    over whatever trials completed.
+    """
+    env = os.environ.copy()
+    env.setdefault("SWE_IMAGE_MIRROR", "swe-images")
+    argv = [args.python] + build_harbor_argv(args, passthrough)
+    log.info("running: %s", " ".join(argv))
+    status = subprocess.run(argv, cwd=str(REPO_ROOT), env=env).returncode
+    if status != 0:
+        log.warning("harbor_eval exited %s; collecting whatever trials completed",
+                    status)
+    return _job_dir_for(args)
+
+
+# --------------------------------------------------------------------------- #
+# Collect (pure fusion)
+# --------------------------------------------------------------------------- #
+
+
+def _trial_log(trial_dir: Path) -> tuple[Optional[Path], Optional[str]]:
+    for name, mode in _LOG_NAMES:
+        p = trial_dir / "agent" / name
+        if p.exists():
+            return p, mode
+    return None, None
+
+
+def _instance_id_from_config(trial_dir: Path) -> Optional[str]:
+    """Clean instance id from the trial config (the prompt only has `# Task: ?`)."""
+    try:
+        data = json.loads((trial_dir / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    task = data.get("task") if isinstance(data, dict) else None
+    path = task.get("path") if isinstance(task, dict) else None
+    if isinstance(path, str) and path:
+        return PurePosixPath(path).name
+    return None
+
+
+def _read_reward(trial_dir: Path) -> Optional[float]:
+    try:
+        return float((trial_dir / "verifier" / "reward.txt").read_text().strip())
+    except Exception:
+        return None
+
+
+def _read_report(trial_dir: Path) -> dict[str, Any]:
+    """Best-effort ``resolved`` + FAIL_TO_PASS/PASS_TO_PASS counts from report.json."""
+    out: dict[str, Any] = {}
+    try:
+        data = json.loads((trial_dir / "verifier" / "report.json").read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    if not isinstance(data, dict):
+        return out
+    for rep in data.values():  # report is keyed by instance id; take the first
+        if not isinstance(rep, dict):
+            continue
+        if isinstance(rep.get("resolved"), bool):
+            out["resolved"] = rep["resolved"]
+        ts = rep.get("tests_status")
+        if isinstance(ts, dict):
+            for field, key in (("FAIL_TO_PASS", "fail_to_pass"),
+                               ("PASS_TO_PASS", "pass_to_pass")):
+                bucket = ts.get(field)
+                if isinstance(bucket, dict) and isinstance(bucket.get("success"), list):
+                    out[key] = len(bucket["success"])
+        break
+    return out
+
+
+def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
+    """Fuse one trial's parsed trajectory with its grade, or None to skip."""
+    log_path, mode = _trial_log(trial_dir)
+    if log_path is None:
+        log.debug("no pi log under %s; skipping", trial_dir)
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8")
+    except Exception as e:  # pragma: no cover - fs failure
+        log.warning("could not read %s: %s", log_path, e)
+        return None
+    traj = parse_pi_conversation(text)
+    if not traj.turns:
+        log.warning("no turns parsed from %s; skipping", log_path)
+        return None
+    iid = (_instance_id_from_config(trial_dir) or traj.instance_id
+           or (trial_dir.name.rsplit("__", 1)[0] or None))
+    reward = _read_reward(trial_dir)
+    rec = traj.to_dict()
+    rec["trial"] = trial_dir.name
+    rec["instance_id"] = iid
+    rec["mode"] = mode
+    rec["reward"] = reward
+    rec["passed"] = reward is not None and reward >= 1.0
+    rec.update(_read_report(trial_dir))
+    return rec
+
+
+def collect_from_job_dir(job_dir: Any) -> list[dict[str, Any]]:
+    """Walk a harbor job dir and return one graded-trajectory record per trial.
+
+    A trial subdir is any directory containing an ``agent/`` subdir. Trials with
+    no parsable pi turns are skipped (logged). Defensive throughout: a corrupt or
+    missing file degrades a single field/trial, never raises.
+    """
+    job_dir = Path(job_dir)
+    records: list[dict[str, Any]] = []
+    for trial_dir in sorted(p for p in job_dir.iterdir()
+                            if p.is_dir() and (p / "agent").is_dir()):
+        rec = _collect_trial(trial_dir)
+        if rec is not None:
+            records.append(rec)
+    return records
+
+
+def write_trajectories(records: list[dict[str, Any]], out_path: Any) -> int:
+    """Write one record per line; returns the number written."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    return len(records)
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    load_dotenv(str(REPO_ROOT / ".env"))
+    args, passthrough = parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.collect_only:
+        job_dir = Path(args.collect_only)
+    elif not args.mode:
+        print("ERROR: --mode {pi-host,pi-container} required (or use --collect-only).",
+              file=sys.stderr)
+        return 2
+    else:
+        job_dir = run_job(args, passthrough)
+
+    if not job_dir.exists():
+        print(f"ERROR: job dir not found: {job_dir}", file=sys.stderr)
+        return 1
+
+    records = collect_from_job_dir(job_dir)
+    out = Path(args.out) if args.out else (job_dir / "pi-trajectories.jsonl")
+    n = write_trajectories(records, out)
+    n_pass = sum(1 for r in records if r.get("passed"))
+    pct = (n_pass / n * 100.0) if n else 0.0
+    print(f"wrote {n} trajectories ({n_pass} passed, {pct:.1f}%) -> {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
