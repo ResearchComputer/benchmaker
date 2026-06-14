@@ -192,6 +192,18 @@ run lacked an instance id) plus the count of assistant messages already in the
 request — so it is correct at any concurrency. A `MISSES` column in the summary
 flags any divergence (a request beyond the recorded turns).
 
+The standalone replay server can also **mock realistic streaming** for
+latency-sensitive benchmarks. Pass a real tokenizer and a per-token delay; the
+first token is emitted immediately (prefill free, TTFT≈0) and each subsequent
+token is spaced by `--inter-token-time` ms. Output stays byte-exact and the
+reported `usage` is the recorded value.
+
+```bash
+pip install 'benchmaker[tokenizer]'   # adds transformers for the tokenizer
+python -m benchmaker.swebench.replay_server replay-trajectories.jsonl \
+    --tokenizer zai-org/GLM-4.7-Flash --inter-token-time 50
+```
+
 ## Examples
 
 Under [`examples/`](examples/):

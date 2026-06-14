@@ -113,6 +113,10 @@ async def test_app_serves_recorded_turns_streaming_and_not():
                 text = await resp.text()
             assert "data: [DONE]" in text
             assert '"content": "done"' in text
+            # default path (no tokenizer) stays single-chunk: one content delta
+            # chunk + one finish chunk, no per-token pacing.
+            chunk_count = sum(1 for l in text.splitlines() if l.startswith("data: {"))
+            assert chunk_count == 2
 
             # overflow -> terminal stop, miss counted
             async with s.post(base, json={"model": "m", "stream": False,
@@ -131,3 +135,199 @@ def test_empty_content_turn_serializes_content_null():
     resp = R.turn_to_openai_response(turn, "m", response_id="x")
     assert resp["choices"][0]["message"]["content"] is None
     assert resp["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "bash"
+
+
+class _StubFast:
+    """Mimics a HF fast tokenizer's offset-mapping call (no transformers dep)."""
+    is_fast = True
+
+    def __init__(self, spans_for):
+        self._spans_for = spans_for  # callable: text -> list[(start, end)]
+
+    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+        assert return_offsets_mapping
+        assert not add_special_tokens
+        return {"offset_mapping": self._spans_for(text)}
+
+
+def test_offset_tokenizer_reconstructs_exactly():
+    # 2-char tokens
+    tok = R._HFOffsetTokenizer(
+        _StubFast(lambda t: [(i, min(i + 2, len(t))) for i in range(0, len(t), 2)]))
+    s = "Hello, world!\n  indented"
+    pieces = tok.tokenize_pieces(s)
+    assert "".join(pieces) == s
+    assert len(pieces) == (len(s) + 1) // 2
+    assert tok.tokenize_pieces("") == []
+
+
+def test_offset_tokenizer_handles_gaps_and_specials():
+    # spans skip some chars (e.g. zero-width/special tokens); reconstruction must
+    # still be exact by attaching skipped chars to the next piece.
+    tok = R._HFOffsetTokenizer(_StubFast(lambda t: [(0, 1), (0, 0), (2, 3)]))
+    pieces = tok.tokenize_pieces("abcd")
+    assert "".join(pieces) == "abcd"
+    assert pieces == ["a", "bc", "d"]  # gap at index 1 folds into the next piece
+
+
+def test_offset_tokenizer_absorbs_leading_gap():
+    # first span starts at 2: chars 0-1 fold into the first piece
+    tok = R._HFOffsetTokenizer(_StubFast(lambda t: [(2, 4), (4, 6)]))
+    pieces = tok.tokenize_pieces("abcdef")
+    assert "".join(pieces) == "abcdef"
+    assert pieces[0] == "abcd"
+
+
+class _CharTok:
+    """One character per token; exact reconstruction, deterministic count."""
+
+    def tokenize_pieces(self, text):
+        return list(text)
+
+
+async def test_stream_turn_order_reconstruction_and_timing(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    monkeypatch.setattr(R.asyncio, "sleep", fake_sleep)
+
+    turn = RecordedTurn(
+        0, "Hi", "rs",
+        [{"id": "c1", "name": "bash", "arguments": {"x": 1}}],
+        "tool_calls",
+        {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4})
+
+    lines = []
+    async for line in R.stream_turn(turn, "m", response_id="id",
+                                    tokenizer=_CharTok(), inter_token_ms=50.0):
+        lines.append(line)
+
+    assert lines[-1] == "data: [DONE]\n\n"
+    payloads = [json.loads(l[len("data: "):]) for l in lines if l.startswith("data: {")]
+    deltas = [p["choices"][0]["delta"] for p in payloads]
+
+    # role appears on the first delta only
+    assert deltas[0].get("role") == "assistant"
+    assert all("role" not in d for d in deltas[1:])
+
+    # each field reconstructs byte-exact
+    reasoning = "".join(d.get("reasoning_content", "") for d in deltas)
+    content = "".join(d.get("content", "") for d in deltas)
+    args = "".join(tc["function"].get("arguments", "")
+                   for d in deltas for tc in d.get("tool_calls", []))
+    assert reasoning == "rs"
+    assert content == "Hi"
+    assert args == json.dumps({"x": 1})
+
+    # ordering: reasoning before content before tool args
+    order = []
+    for d in deltas:
+        if d.get("reasoning_content"):
+            order.append("r")
+        elif d.get("content"):
+            order.append("c")
+        elif d.get("tool_calls"):
+            order.append("t")
+    assert order == sorted(order, key="rct".index)
+
+    # N-1 sleeps total; the first token of the turn is instant (prefill free,
+    # TTFT≈0). struct openers add no sleep; the first args token still paces
+    # relative to the prior content token.
+    n_tokens = len("rs") + len("Hi") + len(json.dumps({"x": 1}))
+    assert len(sleeps) == n_tokens - 1
+    assert all(d == 0.05 for d in sleeps)
+
+    # final chunk carries recorded finish_reason + usage
+    final = payloads[-1]
+    assert final["choices"][0]["finish_reason"] == "tool_calls"
+    assert final["usage"]["total_tokens"] == 4
+
+
+async def test_stream_turn_empty_turn_streams_instantly(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    monkeypatch.setattr(R.asyncio, "sleep", fake_sleep)
+
+    turn = R._terminal_turn()
+    lines = []
+    async for line in R.stream_turn(turn, "m", response_id="id",
+                                    tokenizer=_CharTok(), inter_token_ms=50.0):
+        lines.append(line)
+    assert sleeps == []  # 0 tokens -> no pacing
+    assert lines[-1] == "data: [DONE]\n\n"
+    final = json.loads(lines[-2][len("data: "):])
+    assert final["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_stream_turn_no_pacing_when_delay_zero(monkeypatch):
+    # content-only turn with inter_token_ms=0: the delay>0 guard must skip
+    # asyncio.sleep entirely even though there are many tokens; output is still
+    # byte-exact and properly terminated.
+    sleeps = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    monkeypatch.setattr(R.asyncio, "sleep", fake_sleep)
+
+    turn = RecordedTurn(0, "hello world", None, [], "stop",
+                        {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})
+    lines = []
+    async for line in R.stream_turn(turn, "m", response_id="id",
+                                    tokenizer=_CharTok(), inter_token_ms=0.0):
+        lines.append(line)
+
+    assert sleeps == []  # delay==0 -> guard skips sleep even with tokens
+    payloads = [json.loads(l[len("data: "):]) for l in lines if l.startswith("data: {")]
+    deltas = [p["choices"][0]["delta"] for p in payloads]
+    assert "".join(d.get("content", "") for d in deltas) == "hello world"
+    assert deltas[0].get("role") == "assistant"
+    assert lines[-1] == "data: [DONE]\n\n"
+    final = payloads[-1]
+    assert final["choices"][0]["finish_reason"] == "stop"
+    assert final["usage"]["total_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_app_timed_streaming_reconstructs_over_http():
+    app = R.as_app(_store(), tokenizer=_CharTok(), inter_token_ms=1.0)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    base = f"http://127.0.0.1:{port}/v1/chat/completions"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(base, json={"model": "m", "stream": True,
+                    "messages": _messages(0)}) as resp:
+                text = await resp.text()
+        payloads = [json.loads(l[len("data: "):]) for l in text.splitlines()
+                    if l.startswith("data: {")]
+        deltas = [p["choices"][0]["delta"] for p in payloads]
+        # turn 0 in _store(): content "look", reasoning "reason", bash tool call
+        assert "".join(d.get("content", "") for d in deltas) == "look"
+        assert "".join(d.get("reasoning_content", "") for d in deltas) == "reason"
+        assert "".join(tc["function"].get("arguments", "")
+                       for d in deltas for tc in d.get("tool_calls", [])
+                       ) == json.dumps({"command": "ls"})
+        # many deltas (one per char), not a single burst
+        assert len(deltas) > 5
+        assert "data: [DONE]" in text
+    finally:
+        await runner.cleanup()
+
+
+def test_resolve_tokenizer_guard():
+    # disabled (itt<=0) -> None without importing transformers; a spec is
+    # silently ignored when disabled (not an error).
+    assert R._resolve_tokenizer(0.0, None, True) is None
+    assert R._resolve_tokenizer(0.0, "ignored", True) is None
+    # enabled without a spec -> clear error
+    with pytest.raises(ValueError, match="requires --tokenizer"):
+        R._resolve_tokenizer(50.0, None, True)
