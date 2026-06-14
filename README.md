@@ -165,7 +165,7 @@ Full docs live in [`docs/`](docs/):
 Re-run a recorded SWE-bench job with the LLM **mocked from its own logs** — the
 real pi + sandbox + verifier pipeline still runs, only the model is served back
 from recorded outputs, so re-runs are deterministic and free of model
-cost/variance. Vary `--concurrency` (or `--sweep`) to study the rest of the
+cost/variance. Vary `--concurrency` (or `--concurrency-sweep`) to study the rest of the
 pipeline without the model's stochasticity as a confound. Still needs
 `FLASH_SANDBOX_URL` (the sandbox + verifier are real).
 
@@ -178,7 +178,7 @@ python -m benchmaker.swebench.trajectory jobs/2026-06-08__05-24-01_b352cb \
 # 2) replay (host mode, localhost) across a concurrency sweep
 FLASH_SANDBOX_URL=http://localhost:8080 \
   benchmaker swebench-replay --trajectories replay-trajectories.jsonl \
-    --mode pi-host --sweep 1,5,25
+    --mode pi-host --concurrency-sweep 1,5,25
 
 # container mode: bind 0.0.0.0 and tell the sandbox how to reach the server
 FLASH_SANDBOX_URL=http://localhost:8080 \

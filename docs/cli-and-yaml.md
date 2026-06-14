@@ -191,14 +191,14 @@ server. The LLM is the only thing mocked; everything else runs for real, so
 re-runs are deterministic and free of model cost/variance. Requires
 `FLASH_SANDBOX_URL`.
 
-Can run at one `--concurrency` or a `--sweep` of them (e.g. `--sweep 1,5,25`).
+Can run at one `--concurrency` or a `--concurrency-sweep` of them (e.g. `--concurrency-sweep 1,5,25`).
 
 ```bash
 # Replay a previous harbor job's recorded trajectories at concurrency 4:
 benchmaker swebench-replay --job jobs/2026-01-01__12-00-00_abc123 --concurrency 4
 
 # Sweep concurrencies to find the saturation point:
-benchmaker swebench-replay --trajectories replay-trajectories.jsonl --sweep 1,5,25
+benchmaker swebench-replay --trajectories replay-trajectories.jsonl --concurrency-sweep 1,5,25
 ```
 
 Recipe options (plus the shared `--dotenv`):
@@ -208,7 +208,7 @@ Recipe options (plus the shared `--dotenv`):
 | `--job`                       | Harbor job dir to convert (its pi logs).                         |
 | `--trajectories`              | Prebuilt `replay-trajectories.jsonl` (instead of `--job`).      |
 | `--concurrency`               | Concurrent trials, harbor `n_concurrent_trials` (default `4`).  |
-| `--sweep`                     | Comma list of concurrencies to run in sequence (e.g. `'1,5,25'`). |
+| `--concurrency-sweep`         | Comma list of concurrencies to run in sequence (e.g. `'1,5,25'`). |
 | `--mode`                      | `pi-host` (default) or `pi-container`.                           |
 | `--host`                      | Replay server bind host (default `127.0.0.1`; use `0.0.0.0` for container mode). |
 | `--port`                      | Replay server bind port (default `9100`; `0` = ephemeral).      |

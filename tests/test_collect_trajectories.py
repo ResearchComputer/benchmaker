@@ -81,6 +81,26 @@ def test_build_argv_forwards_known_and_passthrough():
     assert "--force-build" in argv
 
 
+def test_resume_on_by_default():
+    args, _ = C.parse_args(["--mode", "pi-host"])
+    assert args.resume is True
+    assert args.exclude_task == []
+
+
+def test_no_resume_flag():
+    args, _ = C.parse_args(["--mode", "pi-host", "--no-resume"])
+    assert args.resume is False
+
+
+def test_build_argv_emits_exclude_task():
+    args, passthrough = _args(mode="pi-host", job_name="j5")
+    args.exclude_task = ["aa__aa-1", "bb__bb-2"]
+    argv = C.build_harbor_argv(args, passthrough)
+    # one --exclude-task <id> pair per excluded instance, in order
+    pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "--exclude-task"]
+    assert pairs == ["aa__aa-1", "bb__bb-2"]
+
+
 # --------------------------- fusion ---------------------------------------- #
 
 def _pi_log(*events) -> str:
@@ -187,3 +207,94 @@ def test_write_is_valid_replay_store(tmp_path):
     # and the grade survives a raw JSON round-trip
     line = json.loads(out.read_text().strip())
     assert line["passed"] is True and line["mode"] == "pi-container"
+
+
+# --------------------------- resume checkpoint ----------------------------- #
+
+def _finish(trial_dir: Path) -> Path:
+    """Mark a trial as fully done the way harbor does — drop a result.json."""
+    (trial_dir / "result.json").write_text("{}")
+    return trial_dir
+
+
+def test_load_collected_ids_reads_instance_ids(tmp_path):
+    out = tmp_path / "out.jsonl"
+    out.write_text(
+        json.dumps({"instance_id": "aa__aa-1", "passed": True}) + "\n"
+        + json.dumps({"instance_id": "bb__bb-2", "passed": False}) + "\n")
+    assert C.load_collected_ids(out) == {"aa__aa-1", "bb__bb-2"}
+
+
+def test_load_collected_ids_missing_file_is_empty(tmp_path):
+    assert C.load_collected_ids(tmp_path / "nope.jsonl") == set()
+
+
+def test_load_collected_ids_tolerates_blank_and_corrupt_lines(tmp_path):
+    out = tmp_path / "out.jsonl"
+    # a trailing half-written line (OOM mid-append) must not break resume
+    out.write_text(
+        json.dumps({"instance_id": "aa__aa-1"}) + "\n"
+        + "\n"
+        + '{"instance_id": "bb__bb-2", "passe')  # truncated, no newline
+    assert C.load_collected_ids(out) == {"aa__aa-1"}
+
+
+def test_load_collected_ids_falls_back_to_trial(tmp_path):
+    out = tmp_path / "out.jsonl"
+    out.write_text(json.dumps({"trial": "cc__cc-3__xy"}) + "\n")
+    assert C.load_collected_ids(out) == {"cc__cc-3__xy"}
+
+
+# --------------------------- streaming collector --------------------------- #
+
+def test_streamer_appends_only_finished_unseen_trials(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    _finish(_make_trial(job, "aa__aa-1__x", reward="1"))   # done, but already seen
+    _finish(_make_trial(job, "bb__bb-2__y", reward="0"))   # done, fresh -> append
+    _make_trial(job, "cc__cc-3__z", reward="1")            # no result.json -> skip
+
+    out = tmp_path / "out.jsonl"
+    seen = {"aa__aa-1"}                                     # resume checkpoint
+    with out.open("a", encoding="utf-8") as fh:
+        streamer = C._TrialStreamer(job, fh, seen)
+        n = streamer.sweep()
+
+    assert n == 1
+    lines = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert [r["instance_id"] for r in lines] == ["bb__bb-2"]
+    assert seen == {"aa__aa-1", "bb__bb-2"}
+
+
+def test_streamer_sweep_is_idempotent(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    _finish(_make_trial(job, "bb__bb-2__y", reward="0"))
+
+    out = tmp_path / "out.jsonl"
+    with out.open("a", encoding="utf-8") as fh:
+        streamer = C._TrialStreamer(job, fh, set())
+        assert streamer.sweep() == 1
+        # a finished trial that crops up again (e.g. a re-poll) is not re-written
+        assert streamer.sweep() == 0
+
+    lines = [l for l in out.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1
+
+
+def test_streamer_missing_job_dir_is_noop(tmp_path):
+    out = tmp_path / "out.jsonl"
+    with out.open("a", encoding="utf-8") as fh:
+        streamer = C._TrialStreamer(tmp_path / "does-not-exist", fh, set())
+        assert streamer.sweep() == 0
+    assert not out.read_text()
+
+
+def test_summarise_out_counts_total_and_passed(tmp_path):
+    out = tmp_path / "out.jsonl"
+    out.write_text(
+        json.dumps({"instance_id": "a", "passed": True}) + "\n"
+        + json.dumps({"instance_id": "b", "passed": False}) + "\n"
+        + "\n"  # blank line ignored
+        + json.dumps({"instance_id": "c", "passed": True}) + "\n")
+    assert C._summarise_out(out) == (3, 2)

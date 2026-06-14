@@ -209,7 +209,8 @@ def _build_job_config(args: argparse.Namespace) -> JobConfig:
     )
 
     dataset = DatasetConfig(name=args.dataset, n_tasks=args.n_tasks,
-                            task_names=args.task or None)
+                            task_names=args.task or None,
+                            exclude_task_names=args.exclude_task or None)
 
     # Parent directory for the run bundle (harbor writes to <jobs_dir>/<job_name>).
     # Omit when unset so harbor keeps its own default of "jobs".
@@ -301,6 +302,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Cap the number of dataset tasks.")
     p.add_argument("--task", action="append", default=[],
                    help="Restrict to specific task name(s)/glob(s) (repeatable).")
+    p.add_argument("--exclude-task", action="append", default=[],
+                   help="Skip specific task name(s)/glob(s) (repeatable). Applied "
+                        "after --task and before the --n-tasks cap, so the cap "
+                        "selects the first N tasks that remain after exclusion.")
     p.add_argument("--concurrency", type=int, default=4)
     p.add_argument("--n-attempts", type=int, default=1)
     p.add_argument("--timeout-multiplier", type=float, default=4.0,

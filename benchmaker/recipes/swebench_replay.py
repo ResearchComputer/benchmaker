@@ -5,7 +5,7 @@ Builds a replay store from recorded pi logs (or loads a prebuilt
 `replay-trajectories.jsonl`), starts the stateless replay server in-process, and
 runs the *real* harbor SWE-bench pipeline (pi + sandbox + verifier) with the
 model endpoint pointed at the replay server — at one ``--concurrency`` or a
-``--sweep`` of them. The LLM is the only thing mocked; everything else runs for
+``--concurrency-sweep`` of them. The LLM is the only thing mocked; everything else runs for
 real, so re-runs are deterministic and free of model cost/variance.
 
 Still requires ``FLASH_SANDBOX_URL`` (the sandbox + verifier are real). For
@@ -75,7 +75,7 @@ class SWEBenchReplayRecipe(Recipe):
     help = (
         "Replay recorded SWE-bench trajectories deterministically: mock the LLM "
         "with recorded outputs, run the real pi+sandbox+verifier pipeline at one "
-        "--concurrency or a --sweep. Requires FLASH_SANDBOX_URL."
+        "--concurrency or a --concurrency-sweep. Requires FLASH_SANDBOX_URL."
     )
     wants_load_options = False
 
@@ -88,7 +88,7 @@ class SWEBenchReplayRecipe(Recipe):
                          help="Prebuilt replay-trajectories.jsonl (instead of --job)."),
             click.option("--concurrency", type=int, default=4, show_default=True,
                          help="Concurrent trials (harbor n_concurrent_trials)."),
-            click.option("--sweep", default=None,
+            click.option("--concurrency-sweep", "concurrency_sweep", default=None,
                          help="Comma list of concurrencies to run in sequence, "
                               "e.g. '1,5,25' (overrides --concurrency)."),
             click.option("--mode", type=click.Choice(["pi-host", "pi-container"]),
@@ -133,8 +133,9 @@ class SWEBenchReplayRecipe(Recipe):
                          type=float, default=5.0, show_default=True),
         ]
 
-    def run(self, shared: SharedOpts, *, job, trajectories, concurrency, sweep, mode,
-            host, port, reachable_host, model, dataset, n_tasks, task, n_attempts,
+    def run(self, shared: SharedOpts, *, job, trajectories, concurrency,
+            concurrency_sweep, mode, host, port, reachable_host, model, dataset,
+            n_tasks, task, n_attempts,
             timeout_multiplier, backend_type, request_timeout_sec,
             agent_ready_timeout_sec, jobs_dir, timeline,
             utilization_interval_sec) -> Optional[int]:
@@ -190,7 +191,7 @@ class SWEBenchReplayRecipe(Recipe):
                 "cannot select which tasks to replay.")
 
         replay_url = _replay_url(host, port, reachable_host)
-        concurrencies = _parse_concurrencies(sweep, concurrency)
+        concurrencies = _parse_concurrencies(concurrency_sweep, concurrency)
         click.echo(f"replay: {len(store)} trajectories, {len(task_filter)} tasks, "
                    f"model={run_model}, agent={mode}, url={replay_url}, "
                    f"concurrencies={concurrencies}")

@@ -34,7 +34,7 @@ def test_parse_sweep():
 def test_command_help_lists_key_options():
     cmd = make_command(get("swebench-replay"))
     out = CliRunner().invoke(cmd, ["--help"]).output
-    for flag in ("--job", "--trajectories", "--concurrency", "--sweep",
+    for flag in ("--job", "--trajectories", "--concurrency", "--concurrency-sweep",
                  "--mode", "--reachable-host"):
         assert flag in out
 

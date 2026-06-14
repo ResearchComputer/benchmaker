@@ -26,6 +26,16 @@ The script has two responsibilities, cleanly split:
 The grading fields are *additive* keys on top of ``Trajectory.to_dict()``, so the
 output stays a valid replay store (``trajectory.load_store`` ignores them).
 
+**Incremental save + resume.** The ``--out`` JSONL is the checkpoint. Each trial
+is appended the moment it finishes (its ``result.json`` lands in the job dir), so
+a crash — e.g. the systemd memory cap OOM-killing the run — never loses a graded
+trajectory. On the next run the already-saved instance ids are read back and
+handed to ``harbor_eval`` as ``--exclude-task`` while ``--n-tasks`` is lowered by
+how many are already done, so harbor only runs the tasks still missing and the
+file tops up toward ``--n-tasks`` total. Pass ``--no-resume`` to ignore an
+existing ``--out`` and re-run everything. (Resume keys off the output file, not
+harbor's job dir, so it survives changing ``--concurrency`` between runs.)
+
 Examples::
 
     # run pi on the host (all tools routed), 5 tasks, then collect graded trajectories
@@ -47,8 +57,9 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Optional, TextIO
 
 from benchmaker.env import load_dotenv
 from benchmaker.swebench.trajectory import parse_pi_conversation
@@ -61,6 +72,13 @@ log = logging.getLogger("benchmaker.collect_trajectories")
 # pi writes the same `--mode json` event stream under one of these per-trial
 # agent logs; which one tells us the execution mode.
 _LOG_NAMES = (("pi-container.log", "pi-container"), ("pi-host.log", "pi-host"))
+
+# harbor writes this file when a trial is fully done (agent + verifier). We use
+# its presence as the "trial is final, safe to collect" signal while streaming.
+_TRIAL_DONE_MARKER = "result.json"
+
+# How often the streamer polls the job dir for newly-finished trials.
+_POLL_SEC = 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +119,12 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                    help="Output JSONL (default: <job_dir>/pi-trajectories.jsonl).")
     p.add_argument("--collect-only", default=None, metavar="JOB_DIR",
                    help="Skip the run; fuse an existing job dir only.")
+    p.add_argument("--no-resume", dest="resume", action="store_false", default=True,
+                   help="Ignore an existing --out and re-run every task (default: "
+                        "resume — skip tasks already saved in --out).")
+    p.add_argument("--exclude-task", action="append", default=[],
+                   help="Instance id(s) for harbor_eval to skip (repeatable). "
+                        "Normally auto-filled from the --out checkpoint on resume.")
     p.add_argument("--python", default=sys.executable,
                    help="Interpreter used to launch harbor_eval.")
     args, passthrough = p.parse_known_args(argv)
@@ -128,6 +152,8 @@ def build_harbor_argv(args: argparse.Namespace,
     argv += ["--job-name", args.job_name]
     if args.jobs_dir:
         argv += ["--jobs-dir", str(args.jobs_dir)]
+    for task in getattr(args, "exclude_task", None) or []:
+        argv += ["--exclude-task", task]
     argv += list(passthrough or [])
     return argv
 
@@ -139,21 +165,8 @@ def _job_dir_for(args: argparse.Namespace) -> Path:
     return base / args.job_name
 
 
-def run_job(args: argparse.Namespace, passthrough: list[str]) -> Path:
-    """Run harbor_eval in the chosen mode; return the (expected) job dir.
-
-    A nonzero harbor_eval exit is surfaced but not fatal — collection still runs
-    over whatever trials completed.
-    """
-    env = os.environ.copy()
-    env.setdefault("SWE_IMAGE_MIRROR", "swe-images")
-    argv = [args.python] + build_harbor_argv(args, passthrough)
-    log.info("running: %s", " ".join(argv))
-    status = subprocess.run(argv, cwd=str(REPO_ROOT), env=env).returncode
-    if status != 0:
-        log.warning("harbor_eval exited %s; collecting whatever trials completed",
-                    status)
-    return _job_dir_for(args)
+# The run path (subprocess + streaming collection) lives in run_job_streaming,
+# below the collect helpers it depends on.
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +283,165 @@ def write_trajectories(records: list[dict[str, Any]], out_path: Any) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Incremental save + resume
+# --------------------------------------------------------------------------- #
+
+
+def _record_id(rec: dict[str, Any]) -> Optional[str]:
+    """The dedup/resume key for a record: its instance id, trial name as backup."""
+    return rec.get("instance_id") or rec.get("trial")
+
+
+def load_collected_ids(out_path: Any) -> set[str]:
+    """Instance ids already saved in ``out_path`` — the resume checkpoint.
+
+    Tolerant of a partially written file: blank or unparsable lines (e.g. a line
+    truncated by an OOM-kill mid-append) are skipped, not fatal.
+    """
+    out_path = Path(out_path)
+    done: set[str] = set()
+    if not out_path.exists():
+        return done
+    with out_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            rid = _record_id(rec) if isinstance(rec, dict) else None
+            if rid:
+                done.add(rid)
+    return done
+
+
+def _append_record(fh: TextIO, rec: dict[str, Any]) -> None:
+    """Append one JSONL record and flush so it survives an abrupt kill.
+
+    ``flush`` hands the bytes to the OS, which persists them even if this process
+    is later SIGKILLed (the systemd memory cap) — only a machine crash could lose
+    them, which ``fsync`` would not meaningfully change here.
+    """
+    fh.write(json.dumps(rec, default=str) + "\n")
+    fh.flush()
+
+
+class _TrialStreamer:
+    """Append each trial to ``out`` the moment it finishes, in a poller thread.
+
+    A trial counts as *finished* once harbor has written its
+    ``result.json``; only then is its parsed trajectory + grade appended (and
+    only if its id is not already in ``seen``). ``seen`` is shared with the
+    caller — seeded from the resume checkpoint and grown as we write — so a trial
+    is never written twice, within a run or across resumes.
+    """
+
+    def __init__(self, job_dir: Any, fh: TextIO, seen: set[str],
+                 poll_sec: float = _POLL_SEC) -> None:
+        self.job_dir = Path(job_dir)
+        self._fh = fh
+        self._seen = seen
+        self._poll_sec = poll_sec
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="trial-streamer",
+                                         daemon=True)
+        self.n_new = 0
+
+    def start(self) -> "_TrialStreamer":
+        self._thread.start()
+        return self
+
+    def stop_and_join(self) -> int:
+        """Stop polling, drain a final sweep, and return how many were written."""
+        self._stop.set()
+        self._thread.join()
+        self.sweep()  # final pass on the main thread once harbor has exited
+        return self.n_new
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self.sweep()
+            self._stop.wait(self._poll_sec)
+
+    def sweep(self) -> int:
+        """Append every finished, not-yet-seen trial; return how many this pass."""
+        written = 0
+        try:
+            trial_dirs = sorted(p for p in self.job_dir.iterdir()
+                                if p.is_dir() and (p / "agent").is_dir())
+        except FileNotFoundError:
+            return 0  # job dir not created yet
+        for trial_dir in trial_dirs:
+            if not (trial_dir / _TRIAL_DONE_MARKER).exists():
+                continue  # still running / not yet graded
+            # Cheap pre-filter on the trial-dir name before parsing the log.
+            if trial_dir.name.rsplit("__", 1)[0] in self._seen:
+                continue
+            # One bad trial must never stop the poller (and the incremental
+            # saves it provides) for the rest of the run.
+            try:
+                rec = _collect_trial(trial_dir)
+                if rec is None:
+                    continue
+                rid = _record_id(rec)
+                if rid is None or rid in self._seen:
+                    continue
+                _append_record(self._fh, rec)
+            except Exception as e:  # pragma: no cover - defensive
+                log.warning("streamer: could not save %s: %s", trial_dir.name, e)
+                continue
+            self._seen.add(rid)
+            self.n_new += 1
+            written += 1
+            log.info("saved %s (reward=%s)", rid, rec.get("reward"))
+        return written
+
+
+def run_job_streaming(args: argparse.Namespace, passthrough: list[str],
+                      out_path: Any, seen: set[str]) -> tuple[Path, int]:
+    """Run harbor_eval while streaming each finished trial into ``out_path``.
+
+    Returns the job dir and the number of trajectories newly appended this run.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    job_dir = _job_dir_for(args)
+    env = os.environ.copy()
+    env.setdefault("SWE_IMAGE_MIRROR", "swe-images")
+    argv = [args.python] + build_harbor_argv(args, passthrough)
+    log.info("running: %s", " ".join(argv))
+    with out_path.open("a", encoding="utf-8") as fh:
+        streamer = _TrialStreamer(job_dir, fh, seen).start()
+        try:
+            status = subprocess.run(argv, cwd=str(REPO_ROOT), env=env).returncode
+        finally:
+            n_new = streamer.stop_and_join()
+    if status != 0:
+        log.warning("harbor_eval exited %s; kept the %d trials that finished",
+                    status, n_new)
+    return job_dir, n_new
+
+
+def _summarise_out(out_path: Any) -> tuple[int, int]:
+    """(total, passed) over the records currently in ``out_path``."""
+    total = passed = 0
+    for line in Path(out_path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        total += 1
+        if rec.get("passed"):
+            passed += 1
+    return total, passed
+
+
+# --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 
@@ -279,25 +451,56 @@ def main(argv: Optional[list[str]] = None) -> int:
     load_dotenv(str(REPO_ROOT / ".env"))
     args, passthrough = parse_args(sys.argv[1:] if argv is None else argv)
 
+    # --collect-only: one-shot (re-)fuse of an existing job dir into --out.
     if args.collect_only:
         job_dir = Path(args.collect_only)
-    elif not args.mode:
+        if not job_dir.exists():
+            print(f"ERROR: job dir not found: {job_dir}", file=sys.stderr)
+            return 1
+        records = collect_from_job_dir(job_dir)
+        out = Path(args.out) if args.out else (job_dir / "pi-trajectories.jsonl")
+        n = write_trajectories(records, out)
+        n_pass = sum(1 for r in records if r.get("passed"))
+        pct = (n_pass / n * 100.0) if n else 0.0
+        print(f"wrote {n} trajectories ({n_pass} passed, {pct:.1f}%) -> {out}")
+        return 0
+
+    if not args.mode:
         print("ERROR: --mode {pi-host,pi-container} required (or use --collect-only).",
               file=sys.stderr)
         return 2
-    else:
-        job_dir = run_job(args, passthrough)
+
+    out = Path(args.out) if args.out else (_job_dir_for(args) / "pi-trajectories.jsonl")
+
+    # Resume off the --out checkpoint: skip tasks already saved and only top up
+    # to --n-tasks total. (Each finished trial is streamed into --out during the
+    # run, so a crashed run still shrinks the work the next run has to do.)
+    done = load_collected_ids(out) if args.resume else set()
+    if done:
+        log.info("resume: %d trajectory(ies) already in %s; skipping them",
+                 len(done), out)
+    # Merge the resume set with any hand-supplied --exclude-task overrides.
+    args.exclude_task = sorted(set(args.exclude_task) | done)
+    if args.n_tasks is not None:
+        remaining = max(0, args.n_tasks - len(done))
+        if remaining == 0:
+            total, passed = _summarise_out(out)
+            pct = (passed / total * 100.0) if total else 0.0
+            print(f"nothing to do: {len(done)} >= --n-tasks {args.n_tasks} already "
+                  f"in {out} ({passed}/{total} passed, {pct:.1f}%)")
+            return 0
+        args.n_tasks = remaining
+
+    job_dir, n_new = run_job_streaming(args, passthrough, out, set(done))
 
     if not job_dir.exists():
         print(f"ERROR: job dir not found: {job_dir}", file=sys.stderr)
         return 1
 
-    records = collect_from_job_dir(job_dir)
-    out = Path(args.out) if args.out else (job_dir / "pi-trajectories.jsonl")
-    n = write_trajectories(records, out)
-    n_pass = sum(1 for r in records if r.get("passed"))
-    pct = (n_pass / n * 100.0) if n else 0.0
-    print(f"wrote {n} trajectories ({n_pass} passed, {pct:.1f}%) -> {out}")
+    total, passed = _summarise_out(out)
+    pct = (passed / total * 100.0) if total else 0.0
+    print(f"appended {n_new} this run; {total} trajectories total "
+          f"({passed} passed, {pct:.1f}%) -> {out}")
     return 0
 
 
