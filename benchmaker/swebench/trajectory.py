@@ -118,6 +118,46 @@ def _key_from_text(text: str) -> str:
     return "sha1:" + hashlib.sha1((text or "").encode("utf-8")).hexdigest()
 
 
+_BASH_RC_PREFIX = re.compile(r"^returncode:\s*(-?\d+)")
+_BASH_RC_TRAILER = re.compile(r"Command exited with code (-?\d+)")
+_EDIT_NUMBERED = re.compile(r"^edit \d+: ")
+
+
+def derive_tool_status(tool_name: str, content: str) -> Optional[int]:
+    """Map a tool-result's *content* to a command status (or None = unknown).
+
+    The status bit is the only thing the replay guard compares, and the same
+    function runs on both the recorded content and the wire content, so benign
+    text nondeterminism (timestamps, paths) never flips a verdict — only a real
+    environment divergence does. Rendering is owned by ``pi_ext/remote_exec_all.js``
+    (pi-host route_tools=all); the bash trailer branch also accepts pi-container
+    native rendering. Returns None ("unknown") for anything unrecognised so the
+    guard skips it rather than false-firing.
+    """
+    name = (tool_name or "").strip().lower()
+    text = content or ""
+    if name == "bash":
+        m = _BASH_RC_PREFIX.match(text)
+        if m:
+            return int(m.group(1))
+        m = _BASH_RC_TRAILER.search(text)
+        return int(m.group(1)) if m else None
+    if name == "read":
+        return 1 if text.startswith("read: cannot read ") else 0
+    if name == "write":
+        if text.startswith("write: failed for "):
+            return 1
+        return 0 if text.startswith("Wrote ") else None
+    if name == "edit":
+        if (text.startswith("edit: cannot read ")
+                or text.startswith("edit: write-back failed ")
+                or text.startswith("edit: no edits provided")
+                or _EDIT_NUMBERED.match(text)):
+            return 1
+        return 0 if text.startswith("Applied ") else None
+    return None
+
+
 def task_key_from_messages(messages: Any) -> str:
     """Replay key from a request's `messages`: the first user message's task id
     (or a content hash). Shared by converter and server so keys always agree."""
@@ -174,6 +214,31 @@ def _turn_from_assistant(msg: dict, index: int) -> RecordedTurn:
     )
 
 
+def drop_nonfinal_actionless_turns(turns: list[RecordedTurn]) -> list[RecordedTurn]:
+    """Drop every non-final turn that issues no tool call; reindex and return.
+
+    pi advances its agent loop only when a turn carries tool calls to execute; an
+    assistant turn with *no* tool call ends the loop regardless of
+    ``finish_reason`` (verified empirically — re-labelling such a turn ``length``
+    instead of ``stop`` does not make pi continue). A non-final action-less turn
+    is therefore the fingerprint of a truncated (max-tokens) or empty model
+    response that the *original*, live run skipped over (retry / continuation)
+    but that took no action on the repo. Replaying it verbatim makes the agent
+    halt early and drop the rest of the trajectory — including the actual fix —
+    so the task fails deterministically regardless of concurrency.
+
+    These turns change nothing in the sandbox (no tool call), so eliding them
+    reproduces the recorded *actions* faithfully while letting the open-loop
+    replay march to the genuine final turn. Idempotent."""
+    if not turns:
+        return turns
+    last = turns[-1]
+    kept = [t for t in turns[:-1] if t.tool_calls] + [last]
+    for i, t in enumerate(kept):
+        t.index = i
+    return kept
+
+
 def parse_pi_conversation(log_text: str) -> Trajectory:
     """Parse one pi `--mode json` log into a `Trajectory`.
 
@@ -207,7 +272,7 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
     text = first_user_text or ""
     return Trajectory(
         key=_key_from_text(text), instance_id=_instance_id_from_text(text),
-        model=model or "", turns=turns,
+        model=model or "", turns=drop_nonfinal_actionless_turns(turns),
     )
 
 
@@ -265,6 +330,10 @@ def load_store(path: Any) -> dict[str, Trajectory]:
                 log.warning("skipping corrupt JSONL line in %s: %s", path, e)
                 continue
             traj = Trajectory.from_dict(d)
+            # Existing jsonl files were written before action-less turns were
+            # dropped, so normalise on load too (the original job dirs are often
+            # gone, making re-conversion impossible). Idempotent.
+            traj.turns = drop_nonfinal_actionless_turns(traj.turns)
             if traj.key in store:
                 log.warning("duplicate trajectory key %r; last wins", traj.key)
             store[traj.key] = traj

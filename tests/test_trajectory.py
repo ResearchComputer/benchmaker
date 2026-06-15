@@ -89,6 +89,67 @@ def test_parse_pi_conversation_extracts_turns_and_key():
     assert t1.finish_reason == "stop" and t1.content == "done"
 
 
+def test_drop_nonfinal_actionless_turns_elides_and_reindexes():
+    turns = [
+        T.RecordedTurn(0, "", None, [{"id": "c", "name": "bash", "arguments": {}}],
+                       "tool_calls", {}),
+        T.RecordedTurn(1, "", None, [], "stop", {}),    # action-less mid turn (truncation/empty)
+        T.RecordedTurn(2, "thinking only", None, [], "stop", {}),  # also action-less, dropped
+        T.RecordedTurn(3, "", None, [{"id": "d", "name": "write", "arguments": {}}],
+                       "tool_calls", {}),
+        T.RecordedTurn(4, "done", None, [], "stop", {}),  # genuine final turn — always kept
+    ]
+    kept = T.drop_nonfinal_actionless_turns(turns)
+    assert [t.tool_calls and t.tool_calls[0]["name"] or t.finish_reason for t in kept] == \
+        ["bash", "write", "stop"]
+    assert [t.index for t in kept] == [0, 1, 2]   # reindexed contiguously
+
+
+def test_drop_keeps_final_turn_even_if_actionless():
+    turns = [T.RecordedTurn(0, "done", None, [], "stop", {})]
+    assert T.drop_nonfinal_actionless_turns(turns) == turns
+
+
+def test_parse_pi_conversation_drops_midconversation_actionless_turn():
+    # A truncated/empty assistant turn (no tool call) mid-conversation halts pi on
+    # replay; the converter must elide it so the agent reaches the real fix.
+    log = _pi_log(
+        {"type": "message_start", "message": {"role": "user",
+         "content": "Fix.\n# Task: x__x-1\n"}},
+        {"type": "turn_end", "message": {"role": "assistant",       # truncated reasoning, no tool
+         "content": [{"type": "thinking", "thinking": "long cut-off reasoning"}],
+         "stopReason": "maxTokens", "model": "m",
+         "usage": {"input": 1, "output": 8192, "totalTokens": 8193}}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "toolCall", "id": "c1", "name": "write",
+                      "arguments": {"path": "f.py", "content": "fix"}}],
+         "stopReason": "toolUse", "model": "m", "usage": {"input": 2, "output": 3, "totalTokens": 5}}},
+        {"type": "turn_end", "message": {"role": "assistant",
+         "content": [{"type": "text", "text": "done"}], "stopReason": "endTurn",
+         "model": "m", "usage": {"input": 4, "output": 1, "totalTokens": 5}}},
+    )
+    traj = T.parse_pi_conversation(log)
+    assert len(traj.turns) == 2                       # the action-less turn is gone
+    assert traj.turns[0].tool_calls[0]["name"] == "write"
+    assert traj.turns[1].finish_reason == "stop"
+
+
+def test_load_store_drops_actionless_turns_in_existing_jsonl(tmp_path):
+    # Pre-fix jsonl on disk still carries a mid-conversation action-less turn;
+    # load_store must elide it (the original job dir is usually gone, so
+    # re-conversion is not an option).
+    out = tmp_path / "t.jsonl"
+    traj = T.Trajectory(key="k", instance_id="k", model="m", turns=[
+        T.RecordedTurn(0, "", None, [{"id": "c", "name": "bash", "arguments": {}}], "tool_calls", {}),
+        T.RecordedTurn(1, "", None, [], "stop", {}),   # action-less mid turn
+        T.RecordedTurn(2, "done", None, [], "stop", {}),
+    ])
+    out.write_text(json.dumps(traj.to_dict()) + "\n")
+    loaded = T.load_store(out)["k"]
+    assert len(loaded.turns) == 2
+    assert loaded.turns[0].tool_calls[0]["name"] == "bash"
+
+
 def test_parse_pi_conversation_empty_log_is_safe():
     traj = T.parse_pi_conversation("")
     assert traj.turns == [] and traj.key == _key_helper("")
@@ -221,3 +282,35 @@ def test_convert_job_handles_pi_host_logs(tmp_path):
     out = tmp_path / "t.jsonl"
     assert T.convert_job(tmp_path, out) == 1
     assert set(T.load_store(out)) == {"x__x-9"}
+
+
+from benchmaker.swebench.trajectory import derive_tool_status
+
+
+def test_derive_tool_status_bash_returncode_prefix():
+    assert derive_tool_status("bash", "returncode: 0\nhi\n") == 0
+    assert derive_tool_status("bash", "returncode: 1\nTraceback...\n") == 1
+    assert derive_tool_status("bash", "returncode: -1\n") == -1
+
+
+def test_derive_tool_status_bash_container_trailer_fallback():
+    assert derive_tool_status("bash", "boom\nCommand exited with code 2") == 2
+
+
+def test_derive_tool_status_bash_malformed_is_none():
+    assert derive_tool_status("bash", "no status line here") is None
+
+
+def test_derive_tool_status_file_tools():
+    assert derive_tool_status("read", "file contents\n") == 0
+    assert derive_tool_status("read", "read: cannot read /x\nexit 1") == 1
+    assert derive_tool_status("write", "Wrote /x") == 0
+    assert derive_tool_status("write", "write: failed for /x\nexit 1") == 1
+    assert derive_tool_status("edit", "Applied 2 edit(s) to /x") == 0
+    assert derive_tool_status("edit", "edit 0: oldText not found in /x") == 1
+    assert derive_tool_status("edit", "edit: no edits provided") == 1
+    assert derive_tool_status("edit", "edit: cannot read /x") == 1
+
+
+def test_derive_tool_status_unknown_tool_is_none():
+    assert derive_tool_status("mystery", "whatever") is None
