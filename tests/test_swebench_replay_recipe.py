@@ -63,15 +63,29 @@ def test_resolve_task_filter_defaults_to_store_instance_ids():
         "k2": Trajectory(key="k2", instance_id="b__b-2", model="m", turns=[]),
         "k3": Trajectory(key="k3", instance_id=None, model="m", turns=[]),
     }
-    ids, missing = SR._resolve_task_filter((), store)
+    ids, missing = SR._resolve_task_filter((), (), store)
     assert ids == ["a__a-1", "b__b-2"]  # only the recorded tasks, sorted
     assert missing == 1                 # the null-instance_id one is uncovered
 
 
 def test_resolve_task_filter_honors_explicit_task():
     # An explicit --task wins over the store-derived default.
-    ids, missing = SR._resolve_task_filter(("x__x-9",), {})
+    ids, missing = SR._resolve_task_filter(("x__x-9",), (), {})
     assert ids == ["x__x-9"] and missing == 0
+
+
+def test_resolve_task_filter_excludes_tasks():
+    from benchmaker.swebench.trajectory import Trajectory
+    store = {
+        "k1": Trajectory(key="k1", instance_id="a__a-1", model="m", turns=[]),
+        "k2": Trajectory(key="k2", instance_id="b__b-2", model="m", turns=[]),
+    }
+    # --exclude-task drops the named id from the store-derived default...
+    ids, missing = SR._resolve_task_filter((), ("a__a-1",), store)
+    assert ids == ["b__b-2"] and missing == 0
+    # ...and from an explicit --task set too.
+    ids, _ = SR._resolve_task_filter(("a__a-1", "b__b-2"), ("a__a-1",), {})
+    assert ids == ["b__b-2"]
 
 
 def test_resolve_url_host_loopback_and_reachable():
@@ -79,6 +93,12 @@ def test_resolve_url_host_loopback_and_reachable():
     assert SR._resolve_url_host("0.0.0.0", None) == "127.0.0.1"      # bind-all -> loopback URL
     assert SR._resolve_url_host("0.0.0.0", "10.0.0.5") == "10.0.0.5"  # reachable host wins
     assert SR._resolve_url_host("localhost", None) == "localhost"
+
+
+def test_validate_observations_flag_in_help():
+    cmd = make_command(get("swebench-replay"))
+    out = CliRunner().invoke(cmd, ["--help"]).output
+    assert "--validate-observations" in out
 
 
 def test_pi_container_loopback_fails_fast():

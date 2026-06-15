@@ -54,18 +54,21 @@ def _parse_concurrencies(sweep: Optional[str], concurrency: int) -> list[int]:
     return [int(x.strip()) for x in sweep.split(",") if x.strip()]
 
 
-def _resolve_task_filter(task, store) -> tuple[list[str], int]:
+def _resolve_task_filter(task, exclude_task, store) -> tuple[list[str], int]:
     """Which dataset tasks to run, and how many trajectories can't be targeted.
 
     Default to exactly the recorded tasks (each trajectory's instance_id) so
     harbor replays only what we have trajectories for — otherwise it would run
     the whole ``--dataset`` and every task without a recording becomes a replay
     miss. An explicit ``--task`` wins (the user is narrowing on purpose).
+    ``--exclude-task`` drops the named id(s) from the resolved set.
     Returns ``(task_ids, n_missing_instance_id)``."""
-    explicit = list(task)
+    excluded = set(exclude_task)
+    explicit = [t for t in task if t not in excluded]
     if explicit:
         return explicit, 0
-    ids = sorted({t.instance_id for t in store.values() if t.instance_id})
+    ids = sorted({t.instance_id for t in store.values()
+                  if t.instance_id and t.instance_id not in excluded})
     missing = sum(1 for t in store.values() if not t.instance_id)
     return ids, missing
 
@@ -94,6 +97,14 @@ class SWEBenchReplayRecipe(Recipe):
             click.option("--mode", type=click.Choice(["pi-host", "pi-container"]),
                          default="pi-host", show_default=True,
                          help="pi run mode (the harbor agent key)."),
+            click.option("--route-tools", "route_tools",
+                         type=click.Choice(["all", "bash"]),
+                         default="all", show_default=True,
+                         help="pi-host: which tools to route into the sandbox. "
+                              "'all' routes bash+read+write+edit (matches how "
+                              "trajectories are recorded); 'bash' routes only bash "
+                              "(file edits hit the host fs and are lost on replay). "
+                              "Ignored for pi-container (pi runs in the sandbox)."),
             click.option("--host", default="127.0.0.1", show_default=True,
                          help="Replay server bind host (use 0.0.0.0 for container mode)."),
             click.option("--port", type=int, default=9100, show_default=True,
@@ -107,11 +118,21 @@ class SWEBenchReplayRecipe(Recipe):
                               "trajectory's model."),
             click.option("--dataset", default="swebench-verified", show_default=True,
                          help="Harbor dataset slug."),
+            click.option("--exec-timeout-sec", "exec_timeout_sec", type=float,
+                         default=None,
+                         help="pi-host: real per-command timeout (seconds) passed "
+                              "to environment.exec for every routed tool call "
+                              "(default 600). Lower it to surface real sandbox "
+                              "slowness/hangs under load. Ignored for pi-container "
+                              "(pi runs as one process with no per-command timeout)."),
             click.option("--n-tasks", "n_tasks", type=int, default=None,
                          help="Cap the number of recorded tasks to replay "
                               "(applied on top of the recorded-task filter)."),
             click.option("--task", multiple=True,
                          help="Restrict to specific task name(s)/glob(s). Repeatable."),
+            click.option("--exclude-task", "exclude_task", multiple=True,
+                         help="Drop specific task id(s) from the replay set. "
+                              "Repeatable."),
             click.option("--n-attempts", "n_attempts", type=int, default=1,
                          show_default=True, help="Attempts per task."),
             click.option("--timeout-multiplier", "timeout_multiplier", type=float,
@@ -129,16 +150,22 @@ class SWEBenchReplayRecipe(Recipe):
             click.option("--timeline/--no-timeline", "timeline", default=True,
                          show_default=True,
                          help="Capture timeline/utilization/tokens into the job dir."),
+            click.option("--validate-observations/--no-validate-observations",
+                         "validate_observations", default=False, show_default=True,
+                         help="Fail-fast on environment divergence: compare each "
+                              "step's tool-result status against the recording and "
+                              "stop the agent at the first mismatch. Requires a "
+                              "trajectory store recorded with tool_results."),
             click.option("--utilization-interval-sec", "utilization_interval_sec",
                          type=float, default=5.0, show_default=True),
         ]
 
     def run(self, shared: SharedOpts, *, job, trajectories, concurrency,
-            concurrency_sweep, mode, host, port, reachable_host, model, dataset,
-            n_tasks, task, n_attempts,
+            concurrency_sweep, mode, route_tools, host, port, reachable_host, model,
+            dataset, exec_timeout_sec, n_tasks, task, exclude_task, n_attempts,
             timeout_multiplier, backend_type, request_timeout_sec,
             agent_ready_timeout_sec, jobs_dir, timeline,
-            utilization_interval_sec) -> Optional[int]:
+            utilization_interval_sec, validate_observations) -> Optional[int]:
         from benchmaker.swebench import harbor_eval as he
         from benchmaker.swebench import trajectory as T
 
@@ -181,7 +208,7 @@ class SWEBenchReplayRecipe(Recipe):
             raise click.UsageError("--model required (no model recorded in trajectories).")
 
         # Run exactly the recorded tasks, not the whole dataset (see helper).
-        task_filter, n_missing = _resolve_task_filter(task, store)
+        task_filter, n_missing = _resolve_task_filter(task, exclude_task, store)
         if n_missing:
             click.echo(f"warning: {n_missing} trajectories have no instance_id "
                        f"and cannot be targeted; they will be skipped.")
@@ -196,13 +223,29 @@ class SWEBenchReplayRecipe(Recipe):
                    f"model={run_model}, agent={mode}, url={replay_url}, "
                    f"concurrencies={concurrencies}")
 
+        # pi-host edits the sandbox over a bridge; the file tools (read/write/edit)
+        # only land in the sandbox when routed (route_tools=all), which is how the
+        # trajectories were recorded. With the agent default (bash-only) those
+        # recorded edits replay against the host fs and silently no-op. pi-container
+        # runs pi inside the sandbox, so the kwarg does not apply.
+        agent_kwargs = [f"route_tools={route_tools}"] if mode == "pi-host" else []
+        # Real per-command sandbox timeout. Only pi-host routes each tool call
+        # through environment.exec(timeout_sec=...); pi-container runs as one
+        # process with no per-command budget, so the flag is a no-op there.
+        if exec_timeout_sec is not None:
+            if mode == "pi-host":
+                agent_kwargs.append(f"exec_timeout_s={exec_timeout_sec}")
+            else:
+                click.echo("warning: --exec-timeout-sec is ignored for "
+                           "pi-container (no per-command timeout).")
+
         # Static harbor config shared by every sweep iteration; only `concurrency`
         # and `job_name` vary per run (set inside `_run_one`).
         base_ns = argparse.Namespace(
             dataset=dataset, agent=mode, model=run_model,
             api_key="replay",
-            agent_kwarg=[], agent_config_file=None,
-            n_tasks=n_tasks, task=task_filter,
+            agent_kwarg=agent_kwargs, agent_config_file=None,
+            n_tasks=n_tasks, task=task_filter, exclude_task=None,
             n_attempts=n_attempts, timeout_multiplier=timeout_multiplier,
             force_build=False, backend_type=backend_type,
             request_timeout_sec=request_timeout_sec,
@@ -215,20 +258,21 @@ class SWEBenchReplayRecipe(Recipe):
             for c in concurrencies:
                 results.append(asyncio.run(self._run_one(
                     store, base_ns, c, run_model, host, port, reachable_host,
-                    timeline, utilization_interval_sec)))
+                    timeline, utilization_interval_sec, validate_observations)))
         finally:
             if tmpdir is not None:
                 tmpdir.cleanup()
 
         # Comparison table.
-        click.echo("\nCONCURRENCY  ACCURACY  PASS/TOTAL  MISSES  JOB_DIR")
-        for c, accuracy, n_pass, n_total, misses, job_dir in results:
+        click.echo("\nCONCURRENCY  ACCURACY  PASS/TOTAL  MISSES  DIVERG  JOB_DIR")
+        for c, accuracy, n_pass, n_total, misses, diverg, job_dir in results:
             click.echo(f"{c:>11}  {accuracy:>7.1%}  {n_pass:>4}/{n_total:<5}  "
-                       f"{misses:>6}  {job_dir}")
+                       f"{misses:>6}  {diverg:>6}  {job_dir}")
         return None
 
     async def _run_one(self, store, base_ns, concurrency, run_model, host, port,
-                       reachable_host, timeline, utilization_interval_sec) -> tuple:
+                       reachable_host, timeline, utilization_interval_sec,
+                       validate_observations) -> tuple:
         """Serve `store` on host:port and run one harbor job at `concurrency`.
 
         Binds a fresh listener per call (pass --port 0 for an ephemeral port,
@@ -241,9 +285,9 @@ class SWEBenchReplayRecipe(Recipe):
 
         from benchmaker.swebench import harbor_eval as he
         from benchmaker.swebench.observability import run_job_with_observability
-        from benchmaker.swebench.replay_server import as_app, get_misses
+        from benchmaker.swebench.replay_server import as_app, get_divergences, get_misses
 
-        app = as_app(store, model_fallback=run_model)
+        app = as_app(store, model_fallback=run_model, validate=validate_observations)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host, port)
@@ -262,7 +306,7 @@ class SWEBenchReplayRecipe(Recipe):
             rows, accuracy = he._summarise(job_result)
             n_pass = sum(1 for r in rows if r["passed"])
             return (concurrency, accuracy, n_pass, len(rows), get_misses(app),
-                    str(job.job_dir))
+                    get_divergences(app), str(job.job_dir))
         finally:
             await runner.cleanup()
 
