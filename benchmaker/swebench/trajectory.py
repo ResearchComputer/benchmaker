@@ -19,7 +19,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -39,12 +39,13 @@ class RecordedTurn:
     tool_calls: list[dict]          # [{"id","name","arguments": dict}]
     finish_reason: str              # "tool_calls" | "stop"
     usage: dict                     # OpenAI-named: prompt_tokens/completion_tokens/...
+    tool_results: list[dict] = field(default_factory=list)  # [{"name","status"}] per tool_call
 
     def to_dict(self) -> dict:
         return {
             "index": self.index, "content": self.content, "reasoning": self.reasoning,
             "tool_calls": self.tool_calls, "finish_reason": self.finish_reason,
-            "usage": self.usage,
+            "usage": self.usage, "tool_results": self.tool_results,
         }
 
     @classmethod
@@ -56,6 +57,7 @@ class RecordedTurn:
             tool_calls=list(d.get("tool_calls") or []),
             finish_reason=d.get("finish_reason") or "stop",
             usage=dict(d.get("usage") or {}),
+            tool_results=list(d.get("tool_results") or []),
         )
 
 

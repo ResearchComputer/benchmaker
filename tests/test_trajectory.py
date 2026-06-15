@@ -284,13 +284,14 @@ def test_convert_job_handles_pi_host_logs(tmp_path):
     assert set(T.load_store(out)) == {"x__x-9"}
 
 
-from benchmaker.swebench.trajectory import derive_tool_status
+from benchmaker.swebench.trajectory import derive_tool_status, RecordedTurn
 
 
 def test_derive_tool_status_bash_returncode_prefix():
     assert derive_tool_status("bash", "returncode: 0\nhi\n") == 0
     assert derive_tool_status("bash", "returncode: 1\nTraceback...\n") == 1
     assert derive_tool_status("bash", "returncode: -1\n") == -1
+    assert derive_tool_status("bash", "returncode: 0\nCommand exited with code 5") == 0
 
 
 def test_derive_tool_status_bash_container_trailer_fallback():
@@ -314,3 +315,17 @@ def test_derive_tool_status_file_tools():
 
 def test_derive_tool_status_unknown_tool_is_none():
     assert derive_tool_status("mystery", "whatever") is None
+
+
+def test_recorded_turn_tool_results_roundtrip():
+    t = RecordedTurn(0, "c", None, [{"id": "x", "name": "bash", "arguments": {}}],
+                     "tool_calls", {}, tool_results=[{"name": "bash", "status": 0}])
+    assert t.to_dict()["tool_results"] == [{"name": "bash", "status": 0}]
+    back = RecordedTurn.from_dict(t.to_dict())
+    assert back.tool_results == [{"name": "bash", "status": 0}]
+
+
+def test_recorded_turn_tool_results_defaults_empty_for_old_dict():
+    back = RecordedTurn.from_dict({"index": 0, "content": "c", "tool_calls": []})
+    assert back.tool_results == []
+    assert RecordedTurn(0, "c", None, [], "stop", {}).tool_results == []
