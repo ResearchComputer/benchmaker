@@ -251,6 +251,7 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
     first_user_text: Optional[str] = None
     model: Optional[str] = None
     turns: list[RecordedTurn] = []
+    tool_status: dict[str, tuple[str, Optional[int]]] = {}
     for raw in log_text.splitlines():
         raw = raw.strip()
         if not raw:
@@ -265,12 +266,28 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
             msg = ev.get("message")
             if isinstance(msg, dict) and msg.get("role") == "user":
                 first_user_text = _message_text(msg.get("content"))
+        if ev.get("type") == "tool_execution_end":
+            tcid = ev.get("toolCallId")
+            if isinstance(tcid, str) and tcid:
+                tname = ev.get("toolName") or ""
+                result = ev.get("result")
+                text = _message_text(result.get("content")) if isinstance(result, dict) else ""
+                tool_status[tcid] = (tname, derive_tool_status(tname, text))
         if ev.get("type") == "turn_end":
             msg = ev.get("message")
             if isinstance(msg, dict) and msg.get("role") == "assistant":
                 if model is None and isinstance(msg.get("model"), str):
                     model = msg["model"]
                 turns.append(_turn_from_assistant(msg, index=len(turns)))
+    # Attach recorded per-step status, aligned to each turn's tool_calls by id.
+    # (Derived from result *content*, not the event's isError, which is unreliable
+    # in pi-host route_tools=all — always false. See the replay-content-validation spec.)
+    for t in turns:
+        t.tool_results = [
+            {"name": tool_status.get(tc.get("id"), (tc.get("name") or "", None))[0],
+             "status": tool_status.get(tc.get("id"), (tc.get("name") or "", None))[1]}
+            for tc in t.tool_calls
+        ]
     text = first_user_text or ""
     return Trajectory(
         key=_key_from_text(text), instance_id=_instance_id_from_text(text),

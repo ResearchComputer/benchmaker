@@ -284,7 +284,7 @@ def test_convert_job_handles_pi_host_logs(tmp_path):
     assert set(T.load_store(out)) == {"x__x-9"}
 
 
-from benchmaker.swebench.trajectory import derive_tool_status, RecordedTurn
+from benchmaker.swebench.trajectory import derive_tool_status, RecordedTurn, parse_pi_conversation
 
 
 def test_derive_tool_status_bash_returncode_prefix():
@@ -329,3 +329,21 @@ def test_recorded_turn_tool_results_defaults_empty_for_old_dict():
     back = RecordedTurn.from_dict({"index": 0, "content": "c", "tool_calls": []})
     assert back.tool_results == []
     assert RecordedTurn(0, "c", None, [], "stop", {}).tool_results == []
+
+
+def test_parse_captures_tool_results_aligned_by_id():
+    log = "\n".join([
+        json.dumps({"type": "message_start", "message": {"role": "user",
+               "content": [{"type": "text", "text": "# Task: aa__aa-1\n"}]}}),
+        json.dumps({"type": "turn_end", "message": {"role": "assistant", "model": "m",
+               "content": [{"type": "toolCall", "id": "c0", "name": "bash",
+                            "arguments": {"command": "pytest"}}]}}),
+        json.dumps({"type": "tool_execution_end", "toolCallId": "c0", "toolName": "bash",
+               "isError": False, "result": {"content": [{"type": "text",
+                            "text": "returncode: 1\nFAILED\n"}]}}),
+        json.dumps({"type": "turn_end", "message": {"role": "assistant",
+               "content": [{"type": "text", "text": "done"}]}}),
+    ])
+    traj = parse_pi_conversation(log)
+    assert traj.turns[0].tool_results == [{"name": "bash", "status": 1}]
+    assert traj.turns[-1].tool_results == []
