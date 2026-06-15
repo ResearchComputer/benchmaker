@@ -158,6 +158,19 @@ def test_pi_host_stage_all_routes_four_tools(tmp_path):
     assert "register_provider.js" in exts
 
 
+def test_pi_host_env_inlines_api_key(tmp_path):
+    # pi does NOT expand the "$OPENAI_API_KEY" ref in provider config (same as
+    # container mode), so the resolved key must be inlined for register_provider.js
+    # via PI_BENCH_API_KEY_REF — otherwise pi sends an empty bearer -> 401.
+    agent = P.PiHostAgent(logs_dir=tmp_path, model_name="m")
+    env = agent._pi_env(home=tmp_path / "h", base_url="http://h/v1", model="m",
+                        api_key="sk-secret-xyz", bridge_url="http://127.0.0.1:9/")
+    assert env["PI_BENCH_API_KEY_REF"] == "sk-secret-xyz"
+    assert env["OPENAI_API_KEY"] == "sk-secret-xyz"
+    assert env["PI_BENCH_BASE_URL"] == "http://h/v1"
+    assert env["PI_BENCH_MODEL"] == "m"
+
+
 def test_host_extensions_present_and_shaped():
     # provider-registration extension (#2)
     assert P.REGISTER_PROVIDER_EXT.exists()

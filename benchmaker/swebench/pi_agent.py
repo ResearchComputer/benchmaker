@@ -449,26 +449,8 @@ class PiHostAgent(_PiAgentBase):
 
             cmd = pi_command(model, str(prompt_path), provider=self._provider,
                              extra_args=self._pi_extra_args)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                # Point pi at the exact dir we staged config into, rather than
-                # trusting it to derive ~/.pi/agent from HOME (see PI_AGENT_DIR).
-                "PI_CODING_AGENT_DIR": str(home / ".pi" / "agent"),
-                "OPENAI_API_KEY": api_key,
-                "PI_EXEC_BRIDGE": bridge.url,
-                "PI_EXEC_CWD": self._cwd,
-                # Consumed by register_provider.js to register our provider from
-                # env (robust to pi not finding the staged models.json). The key
-                # stays a $-ref the extension resolves at request time.
-                "PI_BENCH_PROVIDER": self._provider,
-                "PI_BENCH_BASE_URL": base_url,
-                "PI_BENCH_MODEL": model,
-                "PI_BENCH_CONTEXT_WINDOW": str(self._context_window),
-                "PI_BENCH_MAX_TOKENS": str(self._max_tokens),
-            }
-            if self._pi_max_turns > 0:
-                env["PI_MAX_TURNS"] = str(self._pi_max_turns)
+            env = self._pi_env(home=home, base_url=base_url, model=model,
+                               api_key=api_key, bridge_url=bridge.url)
             proc = await asyncio.create_subprocess_shell(
                 cmd, cwd=str(home), env=env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
@@ -488,6 +470,40 @@ class PiHostAgent(_PiAgentBase):
         context.metadata = {"exit_status": exit_status, "mode": "host",
                             "route_tools": self._route_tools,
                             "exec_count": bridge.count}
+
+    def _pi_env(self, *, home: Path, base_url: str, model: str, api_key: str,
+                bridge_url: str) -> dict:
+        """Environment for the pi subprocess.
+
+        The provider's apiKey is **inlined** via ``PI_BENCH_API_KEY_REF`` rather
+        than left as the ``$OPENAI_API_KEY`` ref that register_provider.js
+        defaults to: pi's config-value resolution does not expand the ``$``-ref in
+        the apiKey field, so a ref makes pi send an empty/wrong bearer (-> 401)
+        even though ``OPENAI_API_KEY`` is present in the env. Mirrors the
+        inline-key workaround in :class:`PiContainerAgent`.
+        """
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            # Point pi at the exact dir we staged config into, rather than
+            # trusting it to derive ~/.pi/agent from HOME (see PI_AGENT_DIR).
+            "PI_CODING_AGENT_DIR": str(home / ".pi" / "agent"),
+            "OPENAI_API_KEY": api_key,
+            "PI_EXEC_BRIDGE": bridge_url,
+            "PI_EXEC_CWD": self._cwd,
+            # Consumed by register_provider.js to register our provider from env
+            # (robust to pi not finding the staged models.json). The key is
+            # inlined (PI_BENCH_API_KEY_REF), NOT a $-ref — see the docstring.
+            "PI_BENCH_PROVIDER": self._provider,
+            "PI_BENCH_BASE_URL": base_url,
+            "PI_BENCH_MODEL": model,
+            "PI_BENCH_API_KEY_REF": api_key,
+            "PI_BENCH_CONTEXT_WINDOW": str(self._context_window),
+            "PI_BENCH_MAX_TOKENS": str(self._max_tokens),
+        }
+        if self._pi_max_turns > 0:
+            env["PI_MAX_TURNS"] = str(self._pi_max_turns)
+        return env
 
     def _stage_host_config(self, home: Path, base_url: str, model: str) -> None:
         agent_dir = home / ".pi" / "agent"
