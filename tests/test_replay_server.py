@@ -331,3 +331,124 @@ def test_resolve_tokenizer_guard():
     # enabled without a spec -> clear error
     with pytest.raises(ValueError, match="requires --tokenizer"):
         R._resolve_tokenizer(50.0, None, True)
+
+
+def _drive_replay(store, prompt):
+    """Simulate pi's open-loop agent against the replay server: keep calling
+    `select_turn` (keyed by assistant-message count), append the served assistant
+    message, and continue. pi advances ONLY when the served turn carries tool
+    calls to execute; an action-less turn ends the loop regardless of
+    `finish_reason` (verified against the real pi binary). Returns the number of
+    recorded turns the agent actually consumes."""
+    msgs = [{"role": "user", "content": prompt}]
+    consumed = 0
+    while True:
+        turn, _key, _idx = R.select_turn(store, msgs)
+        if turn is None:                       # miss / turn overflow -> terminal stop
+            break
+        consumed += 1
+        am = {"role": "assistant", "content": turn.content or None}
+        if turn.tool_calls:
+            am["tool_calls"] = [{"id": tc["id"], "type": "function",
+                                 "function": {"name": tc["name"], "arguments": "{}"}}
+                                for tc in turn.tool_calls]
+        msgs.append(am)
+        if not turn.tool_calls:                # no tool to run -> pi halts (any finish_reason)
+            break
+        msgs.append({"role": "tool", "content": "result"})  # tool ran, loop for next turn
+    return consumed
+
+
+def _traj_with_actionless_midturn():
+    return Trajectory(key="aa__aa-1", instance_id="aa__aa-1", model="m", turns=[
+        RecordedTurn(0, "", None, [{"id": "c0", "name": "bash", "arguments": {}}], "tool_calls", {}),
+        RecordedTurn(1, "", None, [], "stop", {}),    # action-less mid turn (the bug trigger)
+        RecordedTurn(2, "", None, [{"id": "c2", "name": "write", "arguments": {}}], "tool_calls", {}),
+        RecordedTurn(3, "done", None, [], "stop", {}),  # genuine final stop
+    ])
+
+
+def test_replay_truncates_at_actionless_midturn_without_fix():
+    # Documents the bug: a verbatim action-less mid turn halts the agent early,
+    # dropping the later turns (incl. the write at idx 2).
+    traj = _traj_with_actionless_midturn()
+    store = {traj.key: traj}
+    assert _drive_replay(store, "# Task: aa__aa-1\n") == 2  # stops at the idx-1 action-less turn
+
+
+def test_replay_consumes_all_turns_after_drop():
+    from benchmaker.swebench.trajectory import drop_nonfinal_actionless_turns
+    traj = _traj_with_actionless_midturn()
+    traj.turns = drop_nonfinal_actionless_turns(traj.turns)
+    store = {traj.key: traj}
+    # consumed == recorded: every remaining turn is consumed; the agent reaches
+    # the write and the genuine final stop (3 turns after the no-op is elided).
+    assert _drive_replay(store, "# Task: aa__aa-1\n") == len(traj.turns) == 3
+
+
+def _store_with_results():
+    traj = Trajectory(
+        key="aa__aa-1", instance_id="aa__aa-1", model="m",
+        turns=[
+            RecordedTurn(0, "look", None,
+                         [{"id": "c0", "name": "bash", "arguments": {}}],
+                         "tool_calls", {}, tool_results=[{"name": "bash", "status": 0}]),
+            RecordedTurn(1, "done", None, [], "stop", {}),
+        ],
+    )
+    return {traj.key: traj}
+
+
+def _req(tool_content):
+    return {"messages": [
+        {"role": "user", "content": "# Task: aa__aa-1\n"},
+        {"role": "assistant", "content": "look",
+         "tool_calls": [{"id": "c0", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c0", "content": tool_content},
+    ]}
+
+
+def test_divergence_none_when_status_matches():
+    store = _store_with_results()
+    prev = store["aa__aa-1"].turns[0]
+    msgs = _req("returncode: 0\nok\n")["messages"]
+    assert R._divergence(prev, msgs) is None
+
+
+def test_divergence_detected_when_status_flips():
+    store = _store_with_results()
+    prev = store["aa__aa-1"].turns[0]
+    msgs = _req("returncode: -1\ncommand timed out\n")["messages"]
+    d = R._divergence(prev, msgs)
+    assert d is not None and d[0] == "bash" and d[1] == 0 and d[2] == -1
+
+
+def test_divergence_skipped_when_recorded_status_none():
+    store = _store_with_results()
+    prev = store["aa__aa-1"].turns[0]
+    prev.tool_results = [{"name": "bash", "status": None}]
+    msgs = _req("returncode: -1\n")["messages"]
+    assert R._divergence(prev, msgs) is None
+
+
+def test_divergence_id_keyed_reordering_ok():
+    prev = RecordedTurn(0, "", None,
+                        [{"id": "a", "name": "bash", "arguments": {}},
+                         {"id": "b", "name": "bash", "arguments": {}}],
+                        "tool_calls", {},
+                        tool_results=[{"name": "bash", "status": 0},
+                                      {"name": "bash", "status": 0}])
+    msgs = [
+        {"role": "user", "content": "# Task: aa__aa-1\n"},
+        {"role": "assistant", "content": "x"},
+        {"role": "tool", "tool_call_id": "b", "content": "returncode: 0\n"},
+        {"role": "tool", "tool_call_id": "a", "content": "returncode: 0\n"},
+    ]
+    assert R._divergence(prev, msgs) is None
+
+
+def test_validate_off_ignores_tool_results():
+    store = _store_with_results()
+    app = R.as_app(store, model_fallback="m")  # validate defaults False
+    assert R.get_divergences(app) == 0

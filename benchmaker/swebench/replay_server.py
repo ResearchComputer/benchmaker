@@ -25,7 +25,7 @@ from typing import Any, Optional, Protocol
 from aiohttp import web
 
 from benchmaker.swebench.trajectory import (
-    RecordedTurn, Trajectory, load_store, task_key_from_messages,
+    RecordedTurn, Trajectory, derive_tool_status, load_store, task_key_from_messages,
 )
 
 log = logging.getLogger("benchmaker.replay_server")
@@ -35,6 +35,7 @@ log = logging.getLogger("benchmaker.replay_server")
 # the handler never reassigns an app key after startup (which aiohttp deprecates).
 STORE_KEY: "web.AppKey" = web.AppKey("store", dict)
 MISSES_KEY: "web.AppKey" = web.AppKey("misses", list)
+DIVERGENCES_KEY: "web.AppKey" = web.AppKey("divergences", list)
 TOKENIZER_KEY: "web.AppKey" = web.AppKey("tokenizer", object)
 ITT_KEY: "web.AppKey" = web.AppKey("inter_token_ms", float)
 
@@ -108,6 +109,53 @@ def select_turn(store: dict, messages: Any):
     if traj is None or idx >= len(traj.turns):
         return None, key, idx
     return traj.turns[idx], key, idx
+
+
+def _tool_content_text(content: Any) -> str:
+    """OpenAI tool messages carry `content` as a str (sometimes a blocks list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content
+                       if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _trailing_tool_messages(messages: Any) -> list[dict]:
+    """The role:'tool' messages after the last assistant message (this turn's results)."""
+    out: list[dict] = []
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "assistant":
+            break
+        if role == "tool":
+            out.append(m)
+    out.reverse()
+    return out
+
+
+def _divergence(prev_turn: RecordedTurn, messages: Any):
+    """Return (tool_name, recorded_status, incoming_status) for the first tool
+    result of `prev_turn` whose derived status differs from the recording, else
+    None. Matched by tool_call_id (order-independent). None status on either side
+    is skipped (never a divergence)."""
+    recorded: dict[str, tuple[str, Optional[int]]] = {}
+    results = prev_turn.tool_results or []
+    for tc, tr in zip(prev_turn.tool_calls, results):
+        tcid = tc.get("id")
+        if tcid:
+            recorded[tcid] = (tr.get("name") or tc.get("name") or "", tr.get("status"))
+    for m in _trailing_tool_messages(messages):
+        tcid = m.get("tool_call_id")
+        if tcid not in recorded:
+            continue
+        name, rec_status = recorded[tcid]
+        inc_status = derive_tool_status(name, _tool_content_text(m.get("content")))
+        if rec_status is not None and inc_status is not None and rec_status != inc_status:
+            return (name, rec_status, inc_status)
+    return None
 
 
 def _message_dict(turn: RecordedTurn) -> dict:
@@ -243,13 +291,15 @@ def _terminal_turn() -> RecordedTurn:
 
 def as_app(store: dict, *, model_fallback: str = "",
            tokenizer: Optional[Tokenizer] = None,
-           inter_token_ms: float = 0.0) -> web.Application:
+           inter_token_ms: float = 0.0,
+           validate: bool = False) -> web.Application:
     """Build the aiohttp app. Replay misses (unknown key or turn overflow) are
     counted in place; read them with `get_misses(app)`. When `tokenizer` is set
     and `inter_token_ms > 0`, streaming responses are paced one token per chunk."""
     app = web.Application()
     app[STORE_KEY] = store
     app[MISSES_KEY] = [0]
+    app[DIVERGENCES_KEY] = [0]
     app[TOKENIZER_KEY] = tokenizer
     app[ITT_KEY] = float(inter_token_ms)
 
@@ -266,6 +316,17 @@ def as_app(store: dict, *, model_fallback: str = "",
             app[MISSES_KEY][0] += 1
             log.warning("replay miss key=%s turn_index=%s (serving terminal stop)", key, idx)
             turn = _terminal_turn()
+        elif validate and idx >= 1:
+            traj = store.get(key)
+            prev = traj.turns[idx - 1] if (traj and idx - 1 < len(traj.turns)) else None
+            if prev is not None and prev.tool_results:
+                d = _divergence(prev, messages)
+                if d is not None:
+                    app[DIVERGENCES_KEY][0] += 1
+                    log.warning("replay divergence key=%s turn_index=%s tool=%s "
+                                "recorded_status=%s incoming_status=%s "
+                                "(serving terminal stop)", key, idx - 1, d[0], d[1], d[2])
+                    turn = _terminal_turn()
         response_id = f"chatcmpl-replay-{key}-{idx}"
         if stream:
             resp = web.StreamResponse(
@@ -294,6 +355,11 @@ def as_app(store: dict, *, model_fallback: str = "",
 def get_misses(app: web.Application) -> int:
     """Number of replay misses served by `app` (read after the run)."""
     return app[MISSES_KEY][0]
+
+
+def get_divergences(app: web.Application) -> int:
+    """Number of content divergences detected by `app` (read after the run)."""
+    return app[DIVERGENCES_KEY][0]
 
 
 async def start_server(store: dict, host: str, port: int, *,
