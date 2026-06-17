@@ -100,7 +100,7 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p.add_argument("--dataset", default="swebench-verified",
                    help="Harbor dataset slug (default: swebench-verified).")
     p.add_argument("--n-tasks", type=int, default=None, help="Cap dataset tasks.")
-    p.add_argument("--concurrency", type=int, default=None,
+    p.add_argument("--concurrency", type=int, default=16,
                    help="Concurrent trials (default: harbor_eval's).")
     p.add_argument("--model", default=os.environ.get("OPENAI_COMPATIBLE_MODEL")
                    or os.environ.get("OPENAI_MODEL"),

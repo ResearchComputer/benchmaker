@@ -3,7 +3,6 @@
     "allow": [
       "Bash(rtk grep *)",
       "Bash(rtk ls *)",
-      "Bash(python -c ' *)",
       "Bash(echo \"exit=$?\")",
       "Bash(.venv/bin/python -m pytest tests/test_eval.py -q)",
       "Bash(.venv/bin/python -c \"import harbor, os; print\\(os.path.dirname\\(harbor.__file__\\)\\)\")",
@@ -13,7 +12,6 @@
       "Bash(rtk read *)",
       "Bash(python3 -)",
       "Bash(python -m py_compile src/harbor/environments/flash_sandbox.py)",
-      "Bash(.venv/bin/python -c ' *)",
       "Bash(cd /pub/scratch/xiayao/research/utils/benchmaker *)",
       "Read(//pub/scratch/xiayao/cache/**)",
       "Bash(python -c \"import harbor, os; print\\(os.path.dirname\\(harbor.__file__\\)\\)\")",
@@ -82,12 +80,12 @@
       "Bash(python3 -c \"import flash_sandbox; print\\(flash_sandbox.__file__\\)\")",
       "Bash(python3 -c \"import sys,glob,os; [print\\(p\\) for p in sys.path if 'site-packages' in p]\")",
       "Bash(python -m pytest tests/test_observability.py -k \"util_row or capacity\" -q)",
-      "Bash(python3 -c ' *)",
       "Bash(command -v uv)",
       "Bash(uv add *)",
       "Bash(echo \"=== exit: $? ===\")",
       "Bash(cd /home/xiayao/Documents/projects/researchcomputer/benchmaker/tools/plot && echo \"=== new job files ===\" && ls ../../jobs/2026-06-07__19-03-58_839cda/*.jsonl ../../jobs/2026-06-07__19-03-58_839cda/*.json 2>/dev/null && echo \"=== execute ===\" && uv run --no-sync jupyter nbconvert --to notebook --execute --inplace analyze_jobs.ipynb 2>&1 | tail -3 && echo \"exit=$?\")",
-      "Read(//home/xiayao/Documents/projects/jobs/**)"
+      "Read(//home/xiayao/Documents/projects/jobs/**)",
+      "Bash(cd /home/xiayao/Documents/research/benchmaker/tools/plot && ls ../../jobs/ 2>/dev/null | head -30; echo \"---count---\"; ls ../../jobs/ 2>/dev/null | wc -l)"
     ],
     "additionalDirectories": [
       "/pub/scratch/xiayao/research/harbor/src/harbor/environments",

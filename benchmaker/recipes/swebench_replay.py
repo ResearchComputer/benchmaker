@@ -72,7 +72,6 @@ def _resolve_task_filter(task, exclude_task, store) -> tuple[list[str], int]:
     missing = sum(1 for t in store.values() if not t.instance_id)
     return ids, missing
 
-
 class SWEBenchReplayRecipe(Recipe):
     name = "swebench-replay"
     help = (
