@@ -109,7 +109,7 @@ def _pi_log(*events) -> str:
 
 def _make_trial(job_dir: Path, trial_name: str, *, log_name="pi-container.log",
                 reward="1", instance_id=None, with_turn=True, with_report=True,
-                with_reward=True):
+                with_reward=True, exit_status=None, final_stop=False):
     iid = instance_id or trial_name.rsplit("__", 1)[0]
     tdir = job_dir / trial_name
     (tdir / "agent").mkdir(parents=True)
@@ -122,9 +122,18 @@ def _make_trial(job_dir: Path, trial_name: str, *, log_name="pi-container.log",
                          "arguments": {"command": "ls"}}],
             "stopReason": "toolUse", "model": "zai-org/GLM-4.7-Flash",
             "usage": {"input": 10, "output": 2, "totalTokens": 12}}})
+    if final_stop:
+        # a trailing action-less assistant turn = agent stopped on its own
+        events.append({"type": "turn_end", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "Done."}],
+            "model": "zai-org/GLM-4.7-Flash",
+            "usage": {"input": 5, "output": 1, "totalTokens": 6}}})
     (tdir / "agent" / log_name).write_text(_pi_log(*events))
     (tdir / "config.json").write_text(json.dumps(
         {"task": {"path": f"datasets/swebench-verified/{iid}"}, "trial_name": trial_name}))
+    if exit_status is not None:
+        (tdir / "result.json").write_text(json.dumps(
+            {"agent_result": {"metadata": {"exit_status": exit_status}}}))
     if with_reward:
         (tdir / "verifier").mkdir(exist_ok=True)
         (tdir / "verifier" / "reward.txt").write_text(f"{reward}\n")
@@ -191,6 +200,138 @@ def test_collect_ignores_non_trial_entries(tmp_path):
     (tmp_path / "trajectories.jsonl").write_text("")   # harbor's own file
     recs = C.collect_from_job_dir(tmp_path)
     assert len(recs) == 1
+
+
+# --------------------------- session-file fallback ------------------------- #
+
+def _make_session_trial(job_dir: Path, trial_name: str, *, mode_meta="host",
+                        reward="0", exit_status="time_limit", instance_id=None,
+                        with_turn=True):
+    """A trial whose pi-host.log never landed (killed at the cap), but whose pi
+    session jsonl under agent/pi-home survived and is fully graded."""
+    iid = instance_id or trial_name.rsplit("__", 1)[0]
+    tdir = job_dir / trial_name
+    sess_dir = tdir / "agent" / "pi-home" / ".pi" / "agent" / "sessions" / "s"
+    sess_dir.mkdir(parents=True)
+    events = [
+        {"type": "session", "id": "s1"},
+        {"type": "message", "message": {"role": "user", "content": [
+            {"type": "text", "text": f"Fix.\n# Task: ?\nRepository: {iid}"}]}},
+    ]
+    if with_turn:
+        events.append({"type": "message", "message": {
+            "role": "assistant",
+            "content": [{"type": "toolCall", "id": "c1", "name": "bash",
+                         "arguments": {"command": "ls"}}],
+            "stopReason": "toolUse", "model": "zai-org/GLM-4.7-Flash",
+            "usage": {"input": 10, "output": 2, "totalTokens": 12}}})
+    (sess_dir / "sess.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n")
+    (tdir / "config.json").write_text(json.dumps(
+        {"task": {"path": f"datasets/swebench-verified/{iid}"}}))
+    (tdir / "result.json").write_text(json.dumps(
+        {"agent_result": {"metadata": {"exit_status": exit_status, "mode": mode_meta}}}))
+    (tdir / "verifier").mkdir(exist_ok=True)
+    (tdir / "verifier" / "reward.txt").write_text(f"{reward}\n")
+    return tdir
+
+
+def test_collect_recovers_capped_trial_from_session_file(tmp_path):
+    # The biggest dropped bucket: agent ran to the wall-clock cap, pi-host.log
+    # was never flushed, but the trial was graded. Recover it from the session log.
+    _make_session_trial(tmp_path, "django__django-15098__f7Efx9V",
+                        mode_meta="host", exit_status="time_limit", reward="0")
+    recs = C.collect_from_job_dir(tmp_path)
+    assert len(recs) == 1
+    r = recs[0]
+    assert r["mode"] == "pi-host"           # from result.json metadata.mode
+    assert r["n_turns"] == 1
+    assert r["instance_id"] == "django__django-15098"
+    assert r["reward"] == 0.0 and r["passed"] is False
+    assert r["exit_status"] == "time_limit"
+    assert r["termination"] == "timeout"    # a real agent failure, kept
+    assert r["status_source"] == "result_json"
+
+
+def test_collect_session_fallback_labels_container_mode(tmp_path):
+    _make_session_trial(tmp_path, "aa__aa-1__x", mode_meta="container")
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["mode"] == "pi-container"
+
+
+def test_collect_prefers_event_log_over_session_file(tmp_path):
+    # When a real pi-host.log exists, it wins; the session file is only a fallback.
+    tdir = _make_trial(tmp_path, "bb__bb-2__y", log_name="pi-host.log", reward="1")
+    sdir = tdir / "agent" / "pi-home" / ".pi" / "agent" / "sessions" / "s"
+    sdir.mkdir(parents=True)
+    (sdir / "s.jsonl").write_text("")   # irrelevant; must be ignored
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["mode"] == "pi-host" and r["n_turns"] == 1
+
+
+def test_collect_skips_session_trial_with_no_turns(tmp_path):
+    _make_session_trial(tmp_path, "cc__cc-3__z", with_turn=False)
+    assert C.collect_from_job_dir(tmp_path) == []
+
+
+# --------------------------- completion status ----------------------------- #
+
+def test_status_authoritative_completed(tmp_path):
+    # exit_status "ok" from result.json -> agent stopped on its own
+    _make_trial(tmp_path, "aa__aa-1__x", reward="0", exit_status="ok")
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["exit_status"] == "ok"
+    assert r["termination"] == "completed"
+    assert r["completed"] is True
+    assert r["status_source"] == "result_json"
+    # orthogonal to grade: finished, but the patch did not fix the issue
+    assert r["resolved"] is False
+
+
+def test_status_authoritative_timeout(tmp_path):
+    _make_trial(tmp_path, "bb__bb-2__y", reward="0", exit_status="time_limit")
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["exit_status"] == "time_limit"
+    assert r["termination"] == "timeout"
+    assert r["completed"] is False
+    assert r["status_source"] == "result_json"
+
+
+def test_status_authoritative_error(tmp_path):
+    # any non-ok/time_limit status (exception class, exit_<code>) is an error
+    _make_trial(tmp_path, "cc__cc-3__z", reward="0", exit_status="RuntimeError")
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["termination"] == "error"
+    assert r["completed"] is False
+
+
+def test_status_timeout_can_still_resolve(tmp_path):
+    # termination and grade are independent: a timed-out run may still resolve
+    _make_trial(tmp_path, "dd__dd-4__w", reward="1", exit_status="time_limit")
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["termination"] == "timeout"
+    assert r["resolved"] is True and r["passed"] is True
+
+
+def test_status_inferred_completed_when_no_result_json(tmp_path):
+    # no result.json: infer from the trajectory's own last turn (a stop ending)
+    _make_trial(tmp_path, "ee__ee-5__q", reward="0", final_stop=True)
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["exit_status"] == "unknown"
+    assert r["termination"] == "completed"
+    assert r["completed"] is True
+    assert r["status_source"] == "inferred"
+
+
+def test_status_inferred_incomplete_when_cut_off_mid_tool(tmp_path):
+    # no result.json and the last turn is a tool call -> cut off (timeout/error,
+    # indistinguishable from the trajectory alone)
+    _make_trial(tmp_path, "ff__ff-6__a", reward="0")  # only a tool-call turn
+    r = C.collect_from_job_dir(tmp_path)[0]
+    assert r["exit_status"] == "unknown"
+    assert r["termination"] == "incomplete"
+    assert r["completed"] is False
+    assert r["status_source"] == "inferred"
 
 
 # --------------------------- write / round-trip ---------------------------- #

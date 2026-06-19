@@ -89,6 +89,64 @@ def test_parse_pi_conversation_extracts_turns_and_key():
     assert t1.finish_reason == "stop" and t1.content == "done"
 
 
+def _pi_session(*events) -> str:
+    return "\n".join(e if isinstance(e, str) else json.dumps(e) for e in events) + "\n"
+
+
+def test_parse_pi_session_extracts_turns_key_and_tool_status():
+    # pi's on-disk session log: one {"type":"message"} envelope per line, with
+    # role in {user, assistant, toolResult}. This is what survives when a run is
+    # killed at the wall-clock cap before pi-host.log is flushed.
+    sess = _pi_session(
+        {"type": "session", "version": 3, "id": "s1"},
+        {"type": "model_change", "provider": "bench", "modelId": "m"},
+        {"type": "message", "message": {"role": "user", "content": [
+            {"type": "text", "text": "Fix it.\n# Task: django__django-11095\nRepository: django"}]}},
+        "{ corrupt line",  # must be skipped, not raise
+        {"type": "message", "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "let me look"},
+                {"type": "text", "text": "investigating"},
+                {"type": "toolCall", "id": "call_a", "name": "bash",
+                 "arguments": {"command": "ls"}}],
+            "stopReason": "toolUse", "model": "zai-org/GLM-4.7-Flash",
+            "usage": {"input": 1513, "output": 124, "cacheRead": 0, "cacheWrite": 5,
+                      "totalTokens": 1637, "cost": {"total": 0.0}}}},
+        {"type": "message", "message": {
+            "role": "toolResult", "toolCallId": "call_a", "toolName": "bash",
+            "content": [{"type": "text", "text": "returncode: 0\nok"}], "isError": False}},
+        {"type": "message", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+            "stopReason": "endTurn", "model": "zai-org/GLM-4.7-Flash",
+            "usage": {"input": 2000, "output": 10, "totalTokens": 2010}}},
+    )
+    traj = T.parse_pi_session(sess)
+    assert traj.key == "django__django-11095"
+    assert traj.instance_id == "django__django-11095"
+    assert traj.model == "zai-org/GLM-4.7-Flash"
+    assert len(traj.turns) == 2
+
+    t0 = traj.turns[0]
+    assert t0.index == 0
+    assert t0.content == "investigating"
+    assert t0.reasoning == "let me look"
+    assert t0.finish_reason == "tool_calls"
+    assert t0.tool_calls == [{"id": "call_a", "name": "bash", "arguments": {"command": "ls"}}]
+    assert t0.usage == {"prompt_tokens": 1513, "completion_tokens": 124,
+                        "total_tokens": 1637, "cache_read": 0, "cache_write": 5, "cost": 0.0}
+    # tool result status comes from the toolResult message's content
+    assert t0.tool_results == [{"name": "bash", "status": 0}]
+
+    assert traj.turns[1].finish_reason == "stop" and traj.turns[1].content == "done"
+
+
+def test_parse_pi_session_empty_is_safe():
+    traj = T.parse_pi_session("")
+    assert traj.turns == [] and traj.model == ""
+
+
 def test_drop_nonfinal_actionless_turns_elides_and_reindexes():
     turns = [
         T.RecordedTurn(0, "", None, [{"id": "c", "name": "bash", "arguments": {}}],

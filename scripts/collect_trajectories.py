@@ -62,7 +62,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Optional, TextIO
 
 from benchmaker.env import load_dotenv
-from benchmaker.swebench.trajectory import parse_pi_conversation
+from benchmaker.swebench.trajectory import parse_pi_conversation, parse_pi_session
 
 # Repo root: scripts/<this file> -> ../
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -182,6 +182,37 @@ def _trial_log(trial_dir: Path) -> tuple[Optional[Path], Optional[str]]:
     return None, None
 
 
+# pi persists the live conversation here too. When a run is killed at the
+# wall-clock cap, the `--mode json` log (pi-host.log/pi-container.log) is never
+# flushed but this session jsonl survives — so it is our fallback source for the
+# (validly graded) cap-hit trials that would otherwise be dropped.
+_SESSION_GLOB = "agent/pi-home/.pi/agent/sessions/*/*.jsonl"
+
+# result.json's `agent_result.metadata.mode` ("host"/"container") -> our label.
+_MODE_BY_META = {"host": "pi-host", "container": "pi-container"}
+
+
+def _trial_session_log(trial_dir: Path) -> Optional[Path]:
+    """The most recent pi session jsonl for a trial, or None if there is none."""
+    try:
+        cands = sorted(trial_dir.glob(_SESSION_GLOB))
+    except OSError:
+        return None
+    return cands[-1] if cands else None
+
+
+def _mode_from_result(trial_dir: Path) -> Optional[str]:
+    """pi execution mode from ``result.json`` metadata (the session log can't
+    tell host from container on its own)."""
+    try:
+        data = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    md = (data.get("agent_result") or {}).get("metadata") if isinstance(data, dict) else None
+    meta_mode = md.get("mode") if isinstance(md, dict) else None
+    return _MODE_BY_META.get(meta_mode) if isinstance(meta_mode, str) else None
+
+
 def _instance_id_from_config(trial_dir: Path) -> Optional[str]:
     """Clean instance id from the trial config (the prompt only has `# Task: ?`)."""
     try:
@@ -227,18 +258,103 @@ def _read_report(trial_dir: Path) -> dict[str, Any]:
     return out
 
 
+# The agent's raw ``exit_status`` (see ``benchmaker.swebench.pi_agent``) mapped
+# to a coarse termination class. Anything not listed is an error (an
+# ``exit_<code>`` string or an exception class name from pi_agent's except path).
+_TERMINATION_BY_EXIT = {"ok": "completed", "time_limit": "timeout"}
+
+
+def _read_exit_status(trial_dir: Path) -> Optional[str]:
+    """Raw agent ``exit_status`` from ``result.json`` (None if unavailable).
+
+    harbor records the agent's own status under ``agent_result.metadata`` —
+    ``"ok"`` (the agent stopped on its own), ``"time_limit"`` (killed at the
+    wall-clock cap), or an ``exit_<code>`` / exception-class string (it errored).
+    A top-level ``exception_info`` is a harbor-level error even when no agent
+    status was recorded.
+    """
+    try:
+        data = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    md = (data.get("agent_result") or {}).get("metadata")
+    es = md.get("exit_status") if isinstance(md, dict) else None
+    if isinstance(es, str) and es:
+        return es
+    if data.get("exception_info") is not None:
+        return "error"
+    return None
+
+
+def _termination_from_finish(finish_reason: Optional[str],
+                             has_tool_calls: bool) -> str:
+    """Completed-vs-cut-off from a trajectory's *last* turn.
+
+    A trailing turn that issues no tool call ends pi's agent loop — the agent
+    stopped on its own (``completed``). A trailing tool-call turn is the
+    fingerprint of a run cut off before the model's next reply (a timeout *or*
+    an error — the trajectory alone cannot tell which), so ``incomplete``. No
+    last turn at all -> ``unknown``.
+    """
+    if finish_reason is None:
+        return "unknown"
+    return ("completed" if finish_reason == "stop" and not has_tool_calls
+            else "incomplete")
+
+
+def _termination_from_last_turn(traj: Any) -> str:
+    """Infer termination from a parsed ``Trajectory``'s last recorded turn."""
+    if not traj.turns:
+        return "unknown"
+    last = traj.turns[-1]
+    return _termination_from_finish(last.finish_reason, bool(last.tool_calls))
+
+
+def _completion_fields(trial_dir: Path, traj: Any) -> dict[str, Any]:
+    """The completion-status block fused onto a record.
+
+    Authoritative from ``result.json`` when present (``status_source`` =
+    ``result_json``); otherwise inferred from the trajectory's last turn
+    (``inferred``) — coarser, since inference cannot split timeout from error.
+    """
+    exit_status = _read_exit_status(trial_dir)
+    if exit_status is not None:
+        termination = _TERMINATION_BY_EXIT.get(exit_status, "error")
+        source = "result_json"
+    else:
+        exit_status = "unknown"
+        termination = _termination_from_last_turn(traj)
+        source = "inferred"
+    return {
+        "exit_status": exit_status,
+        "termination": termination,
+        "completed": termination == "completed",
+        "status_source": source,
+    }
+
+
 def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
     """Fuse one trial's parsed trajectory with its grade, or None to skip."""
     log_path, mode = _trial_log(trial_dir)
-    if log_path is None:
-        log.debug("no pi log under %s; skipping", trial_dir)
-        return None
+    if log_path is not None:
+        parse = parse_pi_conversation
+    else:
+        # No `--mode json` log (e.g. killed at the wall-clock cap before it
+        # flushed) — recover the conversation from pi's surviving session log.
+        log_path = _trial_session_log(trial_dir)
+        if log_path is None:
+            log.debug("no pi log or session log under %s; skipping", trial_dir)
+            return None
+        parse = parse_pi_session
+        mode = _mode_from_result(trial_dir)
     try:
         text = log_path.read_text(encoding="utf-8")
     except Exception as e:  # pragma: no cover - fs failure
         log.warning("could not read %s: %s", log_path, e)
         return None
-    traj = parse_pi_conversation(text)
+    traj = parse(text)
     if not traj.turns:
         log.warning("no turns parsed from %s; skipping", log_path)
         return None
@@ -252,6 +368,7 @@ def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
     rec["reward"] = reward
     rec["passed"] = reward is not None and reward >= 1.0
     rec.update(_read_report(trial_dir))
+    rec.update(_completion_fields(trial_dir, traj))
     return rec
 
 

@@ -1,28 +1,9 @@
-#!/usr/bin/env bash
-# Real per-command timeout x concurrency sweep (pi-host replay).
-#
-# Unlike sweep_swebench_loadfactor.sh (which SIMULATES timeouts offline from
-# uncontended durations), this sweep lowers the REAL timeout passed to
-# environment.exec for every routed tool call and runs at varying real
-# concurrency. The goal is to surface genuine sandbox issues -- commands that
-# hang or run slowly under load and get killed by the shrinking budget.
-#
-# Only pi-host is swept: it routes each tool call through the in-harness
-# _ExecBridge as its own environment.exec(timeout_sec=T). pi-container runs pi
-# as one process with no per-command timeout, so there is nothing to sweep.
-#
-# For each (T, C) cell we replay the SAME trajectories and then report:
-#   - solved/total                  (did tighter timeouts diverge the replay?)
-#   - timeouts                      (bridge spans with rc<0 and duration ~ T)
-#   - max/p95 command duration      (how close real execs ran to the wall)
-# A cell where solved drops AND timeouts climb as C rises (at fixed T) is the
-# signature of a real sandbox-under-load problem, not replay divergence.
 set -uo pipefail
 
 # --- config (override via env) ---------------------------------------------
 : "${FLASH_SANDBOX_URL:=http://100.71.204.79:8080}"
 : "${REACHABLE_HOST:=100.71.204.79}"
-: "${TRAJECTORIES:=.local/pi-host-trajectories-100.jsonl}"
+: "${TRAJECTORIES:=.local/pi-host-traj-v1-500.jsonl}"
 : "${N_TASKS:=100}"
 : "${EXCLUDE_TASKS:=psf__requests-2317}"
 : "${TIMEOUTS:=0.00001}"
@@ -42,8 +23,13 @@ echo
 
 # --- run one replay per (T, C) cell ----------------------------------------
 for T in ${TIMEOUTS}; do
+    # Normalize T the same way the summary does (Python f"{T:g}"), so the
+    # directory created here matches the one the summary stats. Without this,
+    # e.g. T=0.00001 creates timeout_T0.00001_c100 but the summary looks up
+    # timeout_T1e-05_c100 -> "(not run)".
+    Tg=$(python3 -c "print(f'{float(\"${T}\"):g}')")
     for C in ${CONCURRENCIES}; do
-        jobs_dir="${OUT_ROOT}/timeout_T${T}_c${C}"
+        jobs_dir="${OUT_ROOT}/timeout_T${Tg}_c${C}"
         echo "=== T=${T}s  c=${C}  -> ${jobs_dir} ==="
         benchmaker swebench-replay \
             --trajectories "${TRAJECTORIES}" \

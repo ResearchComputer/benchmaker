@@ -279,6 +279,63 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
                 if model is None and isinstance(msg.get("model"), str):
                     model = msg["model"]
                 turns.append(_turn_from_assistant(msg, index=len(turns)))
+    return _finalize_trajectory(first_user_text, model, turns, tool_status)
+
+
+def parse_pi_session(session_text: str) -> Trajectory:
+    """Parse one pi on-disk *session* log into a `Trajectory`.
+
+    The session file is the same conversation as `pi --mode json` but in a
+    different envelope: one ``{"type":"message", "message":{...}}`` per line with
+    ``role`` in ``{user, assistant, toolResult}`` (no ``turn_end`` /
+    ``tool_execution_end`` events). It is what survives under
+    ``agent/pi-home/.pi/agent/sessions/`` when a run is killed at the wall-clock
+    cap before ``pi-host.log`` is flushed — so recovering it keeps those
+    (validly graded) cap-hit trials instead of silently dropping them.
+
+    The inner ``message`` shape is identical to the event stream's, so this
+    reuses the same per-message helpers; only the line walk differs. Corrupt or
+    unexpected lines are skipped.
+    """
+    first_user_text: Optional[str] = None
+    model: Optional[str] = None
+    turns: list[RecordedTurn] = []
+    tool_status: dict[str, tuple[str, Optional[int]]] = {}
+    for raw in session_text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            ev = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "message":
+            continue
+        msg = ev.get("message")
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "user":
+            if first_user_text is None:
+                first_user_text = _message_text(msg.get("content"))
+        elif role == "toolResult":
+            tcid = msg.get("toolCallId")
+            if isinstance(tcid, str) and tcid:
+                tname = msg.get("toolName") or ""
+                text = _message_text(msg.get("content"))
+                tool_status[tcid] = (tname, derive_tool_status(tname, text))
+        elif role == "assistant":
+            if model is None and isinstance(msg.get("model"), str):
+                model = msg["model"]
+            turns.append(_turn_from_assistant(msg, index=len(turns)))
+    return _finalize_trajectory(first_user_text, model, turns, tool_status)
+
+
+def _finalize_trajectory(first_user_text: Optional[str], model: Optional[str],
+                         turns: list[RecordedTurn],
+                         tool_status: dict[str, tuple[str, Optional[int]]]) -> Trajectory:
+    """Shared tail for both pi log formats: attach per-step tool status, derive
+    the task key, and elide non-final action-less turns."""
     # Attach recorded per-step status, aligned to each turn's tool_calls by id.
     # (Derived from result *content*, not the event's isError, which is unreliable
     # in pi-host route_tools=all — always false. See the replay-content-validation spec.)

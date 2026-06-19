@@ -589,13 +589,35 @@ class _ExecBridge:
         async def handle(request: "web.Request") -> "web.Response":
             body = await request.json()
             command = body.get("command", "")
-            timeout = int(body.get("timeout") or self._exec_timeout_s)
+            # --exec-timeout-sec is an authoritative ceiling on every routed
+            # call (its docstring: "real per-command timeout ... for every
+            # routed tool call"). The body value is honored only when it is
+            # tighter; otherwise the configured ceiling wins. Kept as float so
+            # sub-second budgets reach environment.exec intact -- int() would
+            # truncate 1e-5 to 0, which some exec implementations read as
+            # "no timeout" and silently no-op the experiment.
+            req_timeout = body.get("timeout")
+            timeout = (min(float(req_timeout), self._exec_timeout_s)
+                       if req_timeout is not None else self._exec_timeout_s)
             self.count += 1
             # Anchor at cwd without a subshell (matches the other agents).
             full = f"cd {shlex.quote(self._cwd)} && {command}" if self._cwd else command
             start = datetime.now(timezone.utc)
             try:
-                res = await self._env.exec(command=full, cwd=self._cwd, timeout_sec=timeout)
+                # Enforce the per-command budget client-side as well as passing
+                # it to the server. The remote flash sandbox silently ignores a
+                # sub-second timeout_sec (commands run to completion with rc>=0),
+                # so without this cap --exec-timeout-sec 1e-5 etc. is a no-op and
+                # the sweep reports ~100% accuracy. asyncio.wait_for is the
+                # authoritative ceiling; on TimeoutError we return rc=-1 to the
+                # model, matching the documented "real per-command timeout".
+                # NB: the server-side process may keep running after we cancel --
+                # acceptable for a replay experiment; use the load-factor
+                # injection path if strict per-command serialization matters.
+                res = await asyncio.wait_for(
+                    self._env.exec(command=full, cwd=self._cwd, timeout_sec=timeout),
+                    timeout=timeout,
+                )
                 rc = int(res.return_code)
                 # elapsed ≈ uncontended command duration (the bridge is meant to run
                 # at low real concurrency). Injection simulates load by cutting the
@@ -618,6 +640,14 @@ class _ExecBridge:
                     "return_code": rc,
                     "stdout": res.stdout or "",
                     "stderr": res.stderr or "",
+                })
+            except asyncio.TimeoutError:
+                self._emit_span(start, -1)
+                return web.json_response({
+                    "return_code": -1,
+                    "stdout": "",
+                    "stderr": (f"command timed out after {timeout}s "
+                               f"(client-enforced per-command budget)"),
                 })
             except Exception as e:  # noqa: BLE001
                 self._emit_span(start, -1)
