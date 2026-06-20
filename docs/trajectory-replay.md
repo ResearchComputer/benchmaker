@@ -41,9 +41,12 @@ string the dataset ships).
 | `--max-tokens`                      | Per-request generation cap (default `1024`).                    |
 | `--max-turns-per-trajectory`       | Cap assistant turns replayed per trajectory.                    |
 | `--max-trajectories`                | Cap number of trajectories replayed.                            |
+| `--concurrent-sessions`             | Interleave turns across up to N concurrent sessions (reuse-after-eviction regime). Defaults the rate to `closed:N`. |
+| `--inter-turn-gap`                  | Per-session think time between turns (interleaved mode): `const:2s`, `exp:1.5`, `uniform:1s..3s`. Default: none. |
 
 Defaults to `--rate closed:8 --duration 24h` (exhaustion ends the run; the
-clock is just a ceiling).
+clock is just a ceiling). With `--concurrent-sessions N` the rate defaults to
+`closed:N` instead.
 
 ## YAML config
 
@@ -117,6 +120,46 @@ Items are emitted in conversation order; closed-loop (`--rate closed:N`)
 keeps same-conversation turns adjacent in the request stream so the cache
 warms naturally. Open-loop would interleave conversations and defeat the
 prefix cache.
+
+## Scheduling regimes: contiguous vs. interleaved
+
+The default order is **contiguous** — all of trajectory A's turns, then all of
+B's. Combined with `closed:N`, turn `k+1` of a session is served within a few
+requests of turn `k`, so its growing history is reused *while still hot in the
+local cache*. This measures **prefix-cache locality** (the best case: locality
+preserved).
+
+`--concurrent-sessions N` switches to the **interleaved** order, which models
+realistic concurrent-conversation serving:
+
+- Up to `N` sessions stay active at once; their turns are round-robined
+  (`A0, B0, C0, …, A1, B1, …`) instead of draining one session at a time.
+- Each session stays causally ordered: its turn `k+1` is not issued until turn
+  `k` **completes** (the runner signals completion via a post-hook), plus an
+  optional `--inter-turn-gap` think time (agent tool-execution / user pause).
+- Because many session histories are live at once, their aggregate KV footprint
+  can exceed the device cache, so a session's history is **evicted before its
+  next turn** and must be recomputed (or reloaded from a slower tier).
+
+This **reuse-after-eviction** regime is what differentiates a flat prefix cache
+from a hierarchical / larger / shared KV tier (HiCache, offloaded host tiers,
+cross-engine stores). The SWE-smith trajectories are large enough that ~30–50
+interleaved sessions overflow a typical device KV pool, producing genuine
+cross-turn eviction pressure from real multi-turn data.
+
+```bash
+# Realistic multi-tenant load: 40 conversations in flight, ~2s think time
+# between a session's turns, exponential gap; rate defaults to closed:40.
+benchmaker trajectory-replay --preset swe-smith \
+  --url http://host:8000/v1/chat/completions --model $MODEL \
+  --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct \
+  --concurrent-sessions 40 --inter-turn-gap exp:2.0 --out-dir runs/
+```
+
+`--inter-turn-gap` distributions: `const:<dur>` (or a bare `2s`), `exp:<mean>`
+(exponential think time), `uniform:<lo>..<hi>`. A larger gap lowers the working
+set (sessions spend more time idle), so it makes the pressure realistic rather
+than maximal.
 
 ## Presets
 

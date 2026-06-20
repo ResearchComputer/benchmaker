@@ -25,6 +25,17 @@ class Workload(ABC):
     async def next_item(self) -> Any:
         """Return the next item. Raise `StopAsyncIteration` to halt the bench."""
 
+    def completion_hook(self) -> Optional[Callable]:
+        """Post-hook the runner must install for this workload to make progress.
+
+        Returns ``None`` by default. A workload that schedules items based on
+        per-request completion (e.g. gating a session's next turn on the prior
+        one finishing) returns a ``(request, response, sample) -> sample``
+        post-hook here; recipe/config builders install it automatically so the
+        workload never stalls waiting for a completion signal it can't see.
+        """
+        return None
+
     async def aclose(self) -> None:
         return None
 

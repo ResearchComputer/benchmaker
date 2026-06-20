@@ -281,6 +281,49 @@ def test_trajectory_replay_e2e_records_metadata(tmp_path):
         loop.call_soon_threadsafe(loop.stop); t.join(timeout=5)
 
 
+def test_trajectory_replay_interleaved_e2e_completes_all_turns(tmp_path):
+    # Interleaved mode drives turns through the runner: the completion post-hook
+    # gates each session's next turn, so the run must still emit every turn and
+    # terminate on exhaustion (no hang, no dropped turns).
+    url, loop, t = _chat_sse_server()
+    try:
+        traj = tmp_path / "t.jsonl"
+        rows = [
+            {"instance_id": "i1", "model": "m",
+             "messages": json.dumps([{"role": "user", "content": "u"},
+                                     {"role": "assistant", "content": "a"}])},
+            {"instance_id": "i2", "model": "m",
+             "messages": json.dumps([{"role": "user", "content": "u"},
+                                     {"role": "assistant", "content": "a1"},
+                                     {"role": "user", "content": "u2"},
+                                     {"role": "assistant", "content": "a2"}])},
+        ]
+        traj.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        out = tmp_path / "runs"
+        res = CliRunner().invoke(main, [
+            "trajectory-replay", "--url", f"{url}/v1/chat/completions",
+            "--model", "target", "--prompts-jsonl", str(traj),
+            "--concurrent-sessions", "2", "--duration", "8s",
+            "--out-dir", str(out), "--dotenv", "", "--quiet"])
+        assert res.exit_code == 0, res.output
+        samples = glob.glob(str(out / "**" / "samples.jsonl"), recursive=True)
+        assert samples
+        recs = [json.loads(l) for l in open(samples[0]) if l.strip()]
+        assert len(recs) == 3
+        assert {r["meta"]["conversation_id"] for r in recs} == {"i1", "i2"}
+        # i2's two turns stayed causally ordered (turn 0 before turn 1).
+        i2_turns = [r["meta"]["turn_index"] for r in recs
+                    if r["meta"]["conversation_id"] == "i2"]
+        assert i2_turns == sorted(i2_turns)
+        # The run bundle records the interleave settings for reproducibility.
+        meta = glob.glob(str(out / "**" / "meta.json"), recursive=True)
+        assert meta
+        run_cfg = json.load(open(meta[0]))["source_config"]
+        assert run_cfg["workload"]["concurrent_sessions"] == 2
+    finally:
+        loop.call_soon_threadsafe(loop.stop); t.join(timeout=5)
+
+
 def test_trajectory_source_config_records_field_names(tmp_path):
     p = tmp_path / "t.jsonl"
     p.write_text(json.dumps({

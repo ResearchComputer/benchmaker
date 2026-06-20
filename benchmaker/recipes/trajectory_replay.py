@@ -3,7 +3,21 @@
 Expands each trajectory into one chat request per assistant turn (growing shared
 prefix) against an OpenAI-compatible endpoint, recording the prefix-cache parity
 pair: meta.expected_prefix_tokens (tokenizer upper bound) vs extra.cached_tokens
-(server actual). Use `--rate closed:N` for clean prefix-cache locality.
+(server actual).
+
+Two scheduling regimes:
+
+* **Contiguous (default)** — all of trajectory A's turns, then all of B's. Turn
+  k+1 is served within a few requests of turn k, so its history is reused while
+  still hot in the local cache. Use ``--rate closed:N`` for clean prefix-cache
+  locality (best case: locality preserved).
+* **Interleaved** (``--concurrent-sessions N``) — keep up to N sessions active
+  and round-robin their turns, gating each session's turn k+1 on turn k's
+  completion (+ an optional ``--inter-turn-gap`` think time). Concurrent session
+  histories overflow the device KV pool, so a session's history is evicted
+  before its next turn — the multi-turn *reuse-after-eviction* regime that
+  stresses hierarchical / shared KV tiers. The in-flight ceiling defaults to
+  ``closed:N`` to match the active session count.
 """
 
 from __future__ import annotations
@@ -67,12 +81,24 @@ class TrajectoryReplayRecipe(Recipe):
                          help="Cap assistant turns replayed per trajectory."),
             click.option("--max-trajectories", "max_trajectories", type=int,
                          default=None, help="Cap number of trajectories replayed."),
+            click.option("--concurrent-sessions", "concurrent_sessions", type=int,
+                         default=None,
+                         help="Interleave turns across up to N concurrent "
+                              "sessions (round-robin, each session's turn k+1 "
+                              "gated on turn k completing) instead of replaying "
+                              "each trajectory contiguously. Enables the "
+                              "reuse-after-eviction regime; defaults the rate to "
+                              "closed:N."),
+            click.option("--inter-turn-gap", "inter_turn_gap", default=None,
+                         help="Per-session think time between consecutive turns "
+                              "(interleaved mode). E.g. 'const:2s', 'exp:1.5', "
+                              "'uniform:1s..3s'. Default: no gap."),
         ]
 
     def build(self, shared: SharedOpts, *, url, model, api_key, header, dataset,
               prompts_jsonl, split, preset, tokenizer, messages_field, id_field,
-              model_field, max_tokens, max_turns_per_trajectory, max_trajectories
-              ) -> BuildResult:
+              model_field, max_tokens, max_turns_per_trajectory, max_trajectories,
+              concurrent_sessions=None, inter_turn_gap=None) -> BuildResult:
         from benchmaker.workloads.llm import OpenAIChatWorkloadType
         from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
 
@@ -99,7 +125,8 @@ class TrajectoryReplayRecipe(Recipe):
             messages_field=messages_field, id_field=id_field,
             model_field=model_field, max_tokens=max_tokens,
             max_turns_per_trajectory=max_turns_per_trajectory,
-            max_trajectories=max_trajectories, tokenizer=tokenizer)
+            max_trajectories=max_trajectories, tokenizer=tokenizer,
+            concurrent_sessions=concurrent_sessions, inter_turn_gap=inter_turn_gap)
 
         source_config = {
             "workload_type": {"type": "openai-chat", "url": wt._url,
@@ -111,14 +138,26 @@ class TrajectoryReplayRecipe(Recipe):
                          "model_field": model_field, "tokenizer": tokenizer,
                          "max_tokens": max_tokens,
                          "max_trajectories": max_trajectories,
-                         "max_turns_per_trajectory": max_turns_per_trajectory},
+                         "max_turns_per_trajectory": max_turns_per_trajectory,
+                         "concurrent_sessions": concurrent_sessions,
+                         "inter_turn_gap": inter_turn_gap},
         }
+
+        # Interleaved mode needs a per-turn completion signal to gate each
+        # session's next turn; wire the workload's post-hook and default the
+        # in-flight ceiling to the active session count.
+        hook = workload.completion_hook()
+        post_hooks: list = [hook] if hook is not None else []
+        default_rate = ("closed:8" if concurrent_sessions is None
+                        else f"closed:{concurrent_sessions}")
+
         # Finite dataset: replay once. The workload raises StopAsyncIteration when
         # exhausted, which halts the run; default to closed-loop with a long
         # nominal duration so exhaustion (not the clock) ends it.
         return BuildResult(
             workload_type=wt, workload=workload, source_config=source_config,
-            default_rate="closed:8", default_duration="24h")
+            post_hooks=post_hooks,
+            default_rate=default_rate, default_duration="24h")
 
 
 register(TrajectoryReplayRecipe())

@@ -407,6 +407,13 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
         workload_type, extra_post = apply_correctness(workload_type, correctness_spec)
         post_hooks = list(post_hooks) + list(extra_post)
 
+    # A workload that schedules on per-request completion (e.g. interleaved
+    # trajectory replay) declares the post-hook it needs; install it so a YAML
+    # config can't silently stall waiting for a signal it never wired up.
+    wl_hook = workload.completion_hook()
+    if wl_hook is not None and wl_hook not in post_hooks:
+        post_hooks = list(post_hooks) + [wl_hook]
+
     recorder = _build_recorder(cfg.get("record"))
 
     return BenchConfig(
