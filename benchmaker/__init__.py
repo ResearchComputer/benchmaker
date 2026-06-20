@@ -153,4 +153,4 @@ __all__ = [
     "write_bundle",
 ]
 
-__version__ = "0.1.1"
+__version__ = "0.1.3"
