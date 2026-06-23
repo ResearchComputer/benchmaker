@@ -219,12 +219,28 @@ def _build_job_config(args: argparse.Namespace) -> JobConfig:
     if jobs_dir:
         job_kwargs["jobs_dir"] = Path(jobs_dir)
 
+    # QoS: when enabled, splat the cpu.weight knobs into the environment kwargs
+    # (consumed by FlashSandboxEnvironment.__init__) and couple the verifier
+    # timeout — QoS demotes verifier-phase CPU, so the verifier needs more
+    # wall-clock time. Left untouched (None) when QoS is off.
+    verifier_timeout_multiplier = None
+    # QoS is wired only via the swebench-replay recipe CLI; harbor_eval's own
+    # _parse_args does not expose these flags, so this guard no-ops there.
+    if getattr(args, "qos_enabled", False):
+        environment.kwargs.update(
+            qos_enabled=True,
+            on_demand_cpu_weight=args.on_demand_cpu_weight,
+            best_effort_cpu_weight=args.best_effort_cpu_weight,
+        )
+        verifier_timeout_multiplier = args.qos_verifier_timeout_multiplier
+
     return JobConfig(
         job_name=args.job_name or "",
         n_attempts=args.n_attempts,
         n_concurrent_trials=args.concurrency,
         quiet=False,
         timeout_multiplier=args.timeout_multiplier,
+        verifier_timeout_multiplier=verifier_timeout_multiplier,
         environment=environment,
         agents=[agent],
         datasets=[dataset],
