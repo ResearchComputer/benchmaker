@@ -15,6 +15,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --exec-timeout-sec counts as a task failure. This is what makes the pass rate
 # actually sensitive to the timeout; default off preserves prior behavior.
 : "${VALIDATE_OBSERVATIONS:=0}"
+# When 1, enable sandbox QoS for the replay (verifier gets a relaxed exec
+# timeout via the multiplier). Mirrors VALIDATE_OBSERVATIONS: off by default so
+# the standard sweep invocation is unchanged.
+: "${QOS_ENABLED:=0}"
+# QOS_VERIFIER_TIMEOUT_MULTIPLIER: when QOS_ENABLED=1, the verifier's timeout
+# budget is scaled by this factor (it runs at best_effort cpu.weight, so it
+# needs more wall-clock). 2.0 gives the verifier twice the base budget.
+: "${QOS_VERIFIER_TIMEOUT_MULTIPLIER:=2.0}"
+# cpu.weight tiers (defaults match harbor's FlashSandboxEnvironment defaults).
+# Exposed so the B4 ship-gate loop can raise best_effort and re-run without
+# editing this script. Only forwarded when QOS_ENABLED=1.
+: "${QOS_ON_DEMAND_CPU_WEIGHT:=10000}"
+: "${QOS_BEST_EFFORT_CPU_WEIGHT:=10}"
 OUT_ROOT="${OUT_ROOT:-jobs}"
 
 # Each sweep run gets its own timestamped root so repeated runs don't pile up
@@ -33,11 +46,24 @@ if [ "${VALIDATE_OBSERVATIONS}" = "1" ]; then
     validate_args+=(--validate-observations)
 fi
 
+qos_args=()
+if [ "${QOS_ENABLED}" = "1" ]; then
+    qos_args+=(--qos-enabled
+               --qos-verifier-timeout-multiplier "${QOS_VERIFIER_TIMEOUT_MULTIPLIER}"
+               --on-demand-cpu-weight "${QOS_ON_DEMAND_CPU_WEIGHT}"
+               --best-effort-cpu-weight "${QOS_BEST_EFFORT_CPU_WEIGHT}")
+fi
+
 echo "Real timeout x concurrency sweep (pi-host)  n_tasks=${N_TASKS}"
 echo "  T grid:           ${TIMEOUTS}"
 echo "  concurrency grid: ${CONCURRENCIES}"
 echo "  excluding:        ${EXCLUDE_TASKS:-<none>}"
 echo "  validate-observations: ${VALIDATE_OBSERVATIONS}"
+if [ "${QOS_ENABLED}" = "1" ]; then
+    echo "  qos-enabled:      ${QOS_ENABLED} (verifier timeout x${QOS_VERIFIER_TIMEOUT_MULTIPLIER}, on_demand=${QOS_ON_DEMAND_CPU_WEIGHT} best_effort=${QOS_BEST_EFFORT_CPU_WEIGHT})"
+else
+    echo "  qos-enabled:      ${QOS_ENABLED}"
+fi
 echo "  sweep root:       ${SWEEP_ROOT}"
 echo
 
@@ -62,6 +88,7 @@ for T in ${TIMEOUTS}; do
             --n-tasks "${N_TASKS}" \
             "${exclude_args[@]}" \
             "${validate_args[@]}" \
+            "${qos_args[@]}" \
             --jobs-dir "${jobs_dir}" \
             || echo "WARNING: T=${T} c=${C} run exited non-zero; continuing"
         echo
