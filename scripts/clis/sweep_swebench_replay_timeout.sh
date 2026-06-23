@@ -1,24 +1,70 @@
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- config (override via env) ---------------------------------------------
 : "${FLASH_SANDBOX_URL:=http://100.71.204.79:8080}"
 : "${REACHABLE_HOST:=100.71.204.79}"
 : "${TRAJECTORIES:=.local/pi-host-traj-v1-500.jsonl}"
-: "${N_TASKS:=100}"
-: "${EXCLUDE_TASKS:=psf__requests-2317}"
-: "${TIMEOUTS:=0.00001}"
-: "${CONCURRENCIES:=100}"
+: "${N_TASKS:=500}"
+: "${EXCLUDE_TASKS:=psf__requests-2317 scikit-learn__scikit-learn-14710 sphinx-doc__sphinx-7590}"
+: "${TIMEOUTS:= 5 10 20}"
+: "${CONCURRENCIES:=16}"
+# When 1, replay fails fast on environment divergence (a live tool-result status
+# that differs from the recording), so a command that times out under a tight
+# --exec-timeout-sec counts as a task failure. This is what makes the pass rate
+# actually sensitive to the timeout; default off preserves prior behavior.
+: "${VALIDATE_OBSERVATIONS:=0}"
+# When 1, enable sandbox QoS for the replay (verifier gets a relaxed exec
+# timeout via the multiplier). Mirrors VALIDATE_OBSERVATIONS: off by default so
+# the standard sweep invocation is unchanged.
+: "${QOS_ENABLED:=0}"
+# QOS_VERIFIER_TIMEOUT_MULTIPLIER: when QOS_ENABLED=1, the verifier's timeout
+# budget is scaled by this factor (it runs at best_effort cpu.weight, so it
+# needs more wall-clock). 2.0 gives the verifier twice the base budget.
+: "${QOS_VERIFIER_TIMEOUT_MULTIPLIER:=2.0}"
+# cpu.weight tiers (defaults match harbor's FlashSandboxEnvironment defaults).
+# Exposed so the B4 ship-gate loop can raise best_effort and re-run without
+# editing this script. Only forwarded when QOS_ENABLED=1.
+: "${QOS_ON_DEMAND_CPU_WEIGHT:=10000}"
+: "${QOS_BEST_EFFORT_CPU_WEIGHT:=10}"
 OUT_ROOT="${OUT_ROOT:-jobs}"
+
+# Each sweep run gets its own timestamped root so repeated runs don't pile up
+# into the same cell dirs (which made the summary count N runs x 497 tasks).
+# Override SWEEP_ROOT to point the run + summary at an existing sweep instead.
+SWEEP_TS="$(date +%Y-%m-%d__%H-%M-%S)"
+SWEEP_ROOT="${SWEEP_ROOT:-${OUT_ROOT}/sweep_${SWEEP_TS}}"
 
 export FLASH_SANDBOX_URL
 
 exclude_args=()
 for t in ${EXCLUDE_TASKS}; do exclude_args+=(--exclude-task "${t}"); done
 
+validate_args=()
+if [ "${VALIDATE_OBSERVATIONS}" = "1" ]; then
+    validate_args+=(--validate-observations)
+fi
+
+qos_args=()
+if [ "${QOS_ENABLED}" = "1" ]; then
+    qos_args+=(--qos-enabled
+               --qos-verifier-timeout-multiplier "${QOS_VERIFIER_TIMEOUT_MULTIPLIER}"
+               --on-demand-cpu-weight "${QOS_ON_DEMAND_CPU_WEIGHT}"
+               --best-effort-cpu-weight "${QOS_BEST_EFFORT_CPU_WEIGHT}")
+fi
+
 echo "Real timeout x concurrency sweep (pi-host)  n_tasks=${N_TASKS}"
 echo "  T grid:           ${TIMEOUTS}"
 echo "  concurrency grid: ${CONCURRENCIES}"
 echo "  excluding:        ${EXCLUDE_TASKS:-<none>}"
+echo "  validate-observations: ${VALIDATE_OBSERVATIONS}"
+if [ "${QOS_ENABLED}" = "1" ]; then
+    echo "  qos-enabled:      ${QOS_ENABLED} (verifier timeout x${QOS_VERIFIER_TIMEOUT_MULTIPLIER}, on_demand=${QOS_ON_DEMAND_CPU_WEIGHT} best_effort=${QOS_BEST_EFFORT_CPU_WEIGHT})"
+else
+    echo "  qos-enabled:      ${QOS_ENABLED}"
+fi
+echo "  sweep root:       ${SWEEP_ROOT}"
 echo
 
 # --- run one replay per (T, C) cell ----------------------------------------
@@ -29,7 +75,7 @@ for T in ${TIMEOUTS}; do
     # timeout_T1e-05_c100 -> "(not run)".
     Tg=$(python3 -c "print(f'{float(\"${T}\"):g}')")
     for C in ${CONCURRENCIES}; do
-        jobs_dir="${OUT_ROOT}/timeout_T${Tg}_c${C}"
+        jobs_dir="${SWEEP_ROOT}/timeout_T${Tg}_c${C}"
         echo "=== T=${T}s  c=${C}  -> ${jobs_dir} ==="
         benchmaker swebench-replay \
             --trajectories "${TRAJECTORIES}" \
@@ -41,6 +87,8 @@ for T in ${TIMEOUTS}; do
             --host 0.0.0.0 \
             --n-tasks "${N_TASKS}" \
             "${exclude_args[@]}" \
+            "${validate_args[@]}" \
+            "${qos_args[@]}" \
             --jobs-dir "${jobs_dir}" \
             || echo "WARNING: T=${T} c=${C} run exited non-zero; continuing"
         echo
@@ -49,77 +97,8 @@ done
 
 # --- summary: solved + timeouts + duration tail per cell -------------------
 echo "=== solved / timeouts / duration tail per (T, c) cell ==="
-OUT_ROOT="${OUT_ROOT}" python3 - "${TIMEOUTS}" "${CONCURRENCIES}" <<'PY'
-import glob
-import json
-import os
-import sys
-
-timeouts = [float(x) for x in sys.argv[1].split()]
-concurrencies = [int(x) for x in sys.argv[2].split()]
-out_root = os.environ.get("OUT_ROOT", "jobs")
-
-
-def _reward(result_json):
-    try:
-        with open(result_json) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-    return (data.get("verifier_result") or {}).get("rewards", {}).get("reward")
-
-
-def _solved(jobs_dir):
-    solved = total = 0
-    for rj in glob.glob(os.path.join(jobs_dir, "**", "result.json"), recursive=True):
-        r = _reward(rj)
-        if r is None:
-            continue
-        total += 1
-        solved += 1 if r == 1.0 else 0
-    return solved, total
-
-
-def _spans(jobs_dir, T):
-    # A real exec timeout shows up as a bridge span with rc<0 whose duration
-    # ran up to the wall; rc<0 with ~0 duration is an instant exec error, not a
-    # timeout, so gate on duration to avoid conflating the two.
-    durs, n_exec, n_timeout = [], 0, 0
-    for sp in glob.glob(os.path.join(jobs_dir, "**", "timeline-spans.jsonl"),
-                        recursive=True):
-        with open(sp) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("name") != "sandbox_exec":
-                    continue
-                d = float(obj.get("duration_s") or 0.0)
-                n_exec += 1
-                durs.append(d)
-                if int(obj.get("rc", 0)) < 0 and d >= 0.9 * T:
-                    n_timeout += 1
-    durs.sort()
-    p95 = durs[int(0.95 * (len(durs) - 1))] if durs else 0.0
-    mx = durs[-1] if durs else 0.0
-    return n_exec, n_timeout, p95, mx
-
-
-hdr = f"{'T(s)':>6} {'c':>5} {'solved':>9} {'timeouts':>9} {'execs':>7} {'p95(s)':>8} {'max(s)':>8}"
-print(hdr)
-print("-" * len(hdr))
-for T in timeouts:
-    for C in concurrencies:
-        jobs_dir = os.path.join(out_root, f"timeout_T{T:g}_c{C}")
-        if not os.path.isdir(jobs_dir):
-            print(f"{T:>6g} {C:>5} {'(not run)':>9}")
-            continue
-        s, n = _solved(jobs_dir)
-        n_exec, n_to, p95, mx = _spans(jobs_dir, T)
-        solved = f"{s}/{n}" if n else "(empty)"
-        print(f"{T:>6g} {C:>5} {solved:>9} {n_to:>9} {n_exec:>7} {p95:>8.1f} {mx:>8.1f}")
-PY
+echo "  sweep root: ${SWEEP_ROOT}"
+OUT_ROOT="${SWEEP_ROOT}" python3 "${SCRIPT_DIR}/summarize_replay_timeout_sweep.py" \
+    --out-root "${SWEEP_ROOT}" \
+    --timeouts ${TIMEOUTS} \
+    --concurrencies ${CONCURRENCIES}

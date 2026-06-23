@@ -157,6 +157,26 @@ class SWEBenchReplayRecipe(Recipe):
                               "trajectory store recorded with tool_results."),
             click.option("--utilization-interval-sec", "utilization_interval_sec",
                          type=float, default=5.0, show_default=True),
+            click.option("--qos-enabled/--no-qos-enabled", "qos_enabled",
+                         default=False, show_default=True,
+                         help="Demote verifier-phase containers to best_effort "
+                              "cpu.weight (and apply the QoS verifier-timeout "
+                              "multiplier)."),
+            click.option("--on-demand-cpu-weight", "on_demand_cpu_weight",
+                         type=int, default=10000, show_default=True,
+                         help="cpu.weight for on-demand (agent-phase) containers "
+                              "when --qos-enabled. Ignored when --no-qos-enabled."),
+            click.option("--best-effort-cpu-weight", "best_effort_cpu_weight",
+                         type=int, default=10, show_default=True,
+                         help="cpu.weight for best-effort (verifier-phase) "
+                              "containers when --qos-enabled. Ignored when "
+                              "--no-qos-enabled."),
+            click.option("--qos-verifier-timeout-multiplier",
+                         "qos_verifier_timeout_multiplier",
+                         type=float, default=2.0, show_default=True,
+                         help="Verifier timeout multiplier applied only when "
+                              "--qos-enabled (QoS demotes verifier CPU, so the "
+                              "verifier needs more wall-clock time)."),
         ]
 
     def run(self, shared: SharedOpts, *, job, trajectories, concurrency,
@@ -164,7 +184,9 @@ class SWEBenchReplayRecipe(Recipe):
             dataset, exec_timeout_sec, n_tasks, task, exclude_task, n_attempts,
             timeout_multiplier, backend_type, request_timeout_sec,
             agent_ready_timeout_sec, jobs_dir, timeline,
-            utilization_interval_sec, validate_observations) -> Optional[int]:
+            utilization_interval_sec, validate_observations,
+            qos_enabled, on_demand_cpu_weight, best_effort_cpu_weight,
+            qos_verifier_timeout_multiplier) -> Optional[int]:
         from benchmaker.swebench import harbor_eval as he
         from benchmaker.swebench import trajectory as T
 
@@ -250,6 +272,10 @@ class SWEBenchReplayRecipe(Recipe):
             request_timeout_sec=request_timeout_sec,
             agent_ready_timeout_sec=agent_ready_timeout_sec,
             jobs_dir=jobs_dir,
+            qos_enabled=qos_enabled,
+            on_demand_cpu_weight=on_demand_cpu_weight,
+            best_effort_cpu_weight=best_effort_cpu_weight,
+            qos_verifier_timeout_multiplier=qos_verifier_timeout_multiplier,
         )
 
         results: list[tuple] = []
