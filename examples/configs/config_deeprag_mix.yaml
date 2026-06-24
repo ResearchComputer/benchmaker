@@ -1,0 +1,30 @@
+# Phase-swinging prefill/decode workload. Prepare both inputs first:
+#   python tools/rag/prepare.py --out .local/hotpotqa_distractor.jsonl
+#   python tools/sharegpt/prepare.py --out .local/sharegpt_v3.jsonl
+workload_type:
+  type: openai
+  url: ${OPENAI_API_BASE_URL}/chat/completions
+  model: ${OPENAI_MODEL}
+  timeout_s: 600
+  passthrough_meta: true
+
+mix:
+  lanes:
+    - name: deeprag
+      workload:
+        type: deeprag
+        path: .local/hotpotqa_distractor.jsonl
+        depth: 10
+        context_tokens_target: 12000
+        max_tokens: 64
+      rate: sweep:2,8,2,8@60s
+
+    - name: sharegpt
+      workload:
+        type: jsonl
+        path: .local/sharegpt_v3.jsonl
+        loop: true
+      rate: sweep:8,2,8,2@60s
+
+connection_limit: 512
+max_in_flight: 1024

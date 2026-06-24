@@ -286,6 +286,13 @@ class OpenAIChatWorkloadType(WorkloadType):
             sample.extra["prompt_tokens"] = float(prompt_tokens)
         if cached_tokens is not None:
             sample.extra["cached_tokens"] = float(cached_tokens)
+        # Dataset workloads can provide a pre-run prompt-size estimate and a
+        # RAG packing depth through Request.meta. Preserve them as numeric
+        # metrics even when an endpoint omits usage information.
+        for metric in ("prompt_tokens_hint", "rag_depth"):
+            value = request.meta.get(metric)
+            if isinstance(value, (int, float)):
+                sample.extra[metric] = float(value)
 
         if completion_tokens > 0 and ttft is not None and response.elapsed_s > ttft:
             sample.extra["tokens_per_s"] = completion_tokens / (response.elapsed_s - ttft)

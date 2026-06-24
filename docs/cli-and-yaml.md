@@ -369,13 +369,24 @@ workload_type:
 
 # ---------- workload (optional; defaults to single None item) ----------
 workload:
-  type: static | jsonl | callable | factory
+  type: static | jsonl | callable | hf | deeprag | factory
   # type-specific kwargs
 
-# ---------- load (required) ----------
+# ---------- load (required unless mix is configured) ----------
 load: <rate spec>                    # string or dict; see below
 duration: 30s                        # any string accepted by parse_duration
 max_requests: 100000                 # optional
+
+# ---------- mix (alternative to top-level workload + load) ----------
+# Lanes run concurrently and each sample gets meta.lane=<name>.
+mix:
+  lanes:
+    - name: deeprag
+      workload: {type: deeprag, path: .local/hotpotqa_distractor.jsonl, depth: 10}
+      rate: sweep:2,8,2,8@60s
+    - name: sharegpt
+      workload: {type: jsonl, path: .local/sharegpt_v3.jsonl}
+      rate: sweep:8,2,8,2@60s
 
 # ---------- hooks (optional) ----------
 pre_hooks:
@@ -439,6 +450,8 @@ progress_every_s: 1.0                # 0 disables progress output
   eval sets (`gsm8k`, `mmlu`, `humaneval`) or pass `path/name/split/prompt_field/
   reference_field/...` explicitly. Requires `pip install -e .[hf]`. See
   [Workloads & workload-types](workloads.md#hfdatasetworkload).
+- `deeprag` (or `deep-rag`) — `DeepRAGWorkload(...)`, reading prepared
+  multi-passage QA JSONL. See [DeepRAG and mixed lanes](deeprag-mix.md).
 - `trajectory` — `TrajectoryReplayWorkload(...)`. Expand multi-turn trajectories
   into per-turn items. See [Trajectory replay](trajectory-replay.md).
 - `factory: 'module:fn'` — call `fn(**kwargs)`; must return a `Workload`.
@@ -473,6 +486,15 @@ load:
   rps: 200
   seed: 42
 ```
+
+### `mix` lanes
+
+`mix` replaces the top-level `workload` and `load` fields. Each lane requires a
+unique `name`, a `workload`, and a `rate` (or `load`) specification. Lanes share
+the top-level `workload_type` and run concurrently; their samples preserve the
+lane name in `meta.lane`, and the result summary includes `lanes.<name>`
+metrics. A lane can set its own `duration` or `max_requests`; otherwise the
+top-level values are used.
 
 ### `monitors` items
 
