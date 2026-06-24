@@ -45,13 +45,15 @@ A benchmark in benchmaker is the composition of four things:
    `sandbox`/`swebench`), `benchmaker run`, full YAML schema.
 10. [ShareGPT benchmark](sharegpt-benchmark.md) — self-contained end-to-end
     walkthrough: real prompt dataset → OpenAI-compatible endpoint → metrics.
-11. [pi on SWE-bench](pi-swebench.md) — run the pi coding agent on SWE-bench via
+11. [DeepRAG and mixed lanes](deeprag-mix.md) — prefill-heavy retrieval plus
+    independently scheduled, tagged phase-swinging datasets.
+12. [pi on SWE-bench](pi-swebench.md) — run the pi coding agent on SWE-bench via
     harbor; in-container vs host + remote-bash modes, and the one-command runner.
-12. [SGLang benchmarking](sglang.md) — drive the SGLang native `/generate` endpoint;
+13. [SGLang benchmarking](sglang.md) — drive the SGLang native `/generate` endpoint;
     raw-text parity checks, streaming metrics.
-13. [Trajectory replay](trajectory-replay.md) — prefix-cache parity benchmarking with
+14. [Trajectory replay](trajectory-replay.md) — prefix-cache parity benchmarking with
     multi-turn trajectory datasets; expected vs actual cached tokens.
-14. [Command timeouts under load](command-timeout-under-load.md) — deterministic
+15. [Command timeouts under load](command-timeout-under-load.md) — deterministic
     `accuracy(τ)` curve (`τ = T/L`) measuring how per-command timeouts degrade
     SWE-bench accuracy; offline Tier‑1 analysis + live `BENCH_LOAD_FACTOR` sweep.
 

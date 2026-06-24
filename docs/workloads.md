@@ -120,6 +120,30 @@ tokens received"`).
 **`cached_tokens`** is also captured when the server returns it (vLLM's prefix
 cache hit count).
 
+### `DeepRAGWorkload`
+
+`DeepRAGWorkload` reads prepared multi-passage QA JSONL and builds a short
+answer request with a deliberately long retrieved context. It emits OpenAI
+chat `messages`, a `reference`, `rag_depth`, and `prompt_tokens_hint`.
+
+```python
+from benchmaker import DeepRAGWorkload
+
+workload = DeepRAGWorkload(
+    path=".local/hotpotqa_distractor.jsonl",
+    depth=10,
+    context_tokens_target=12000,
+    max_tokens=64,
+)
+```
+
+Prepare the default HotpotQA distractor corpus with
+`python tools/rag/prepare.py`. Pair the workload with
+`OpenAIChatWorkloadType(passthrough_meta=True)` so metadata is recorded rather
+than sent to the endpoint, and optionally wrap it in `EvalWorkloadType` for
+short-answer scoring. See [DeepRAG and mixed lanes](deeprag-mix.md) for a full
+phase-swing configuration.
+
 ### `SGLangGenerateWorkloadType`
 
 SGLang's native `/generate` endpoint. Unlike the OpenAI path, the body is

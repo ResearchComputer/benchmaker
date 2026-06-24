@@ -31,10 +31,30 @@ from benchmaker.workloads.datasets import Workload, StaticWorkload
 
 
 @dataclass
+class BenchLane:
+    """One independently scheduled input lane in a mixed benchmark.
+
+    All lanes share the enclosing :class:`BenchConfig`'s workload type and
+    endpoint, but each owns its own data source and load model.  This keeps
+    OpenAI/HTTP protocol configuration centralized while preserving independent
+    arrival processes for phase-swing experiments.
+    """
+
+    name: str
+    workload: Workload
+    load: LoadModel
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError("lane name must be a non-empty string")
+
+
+@dataclass
 class BenchConfig:
     workload_type: WorkloadType                # how to talk to the service
-    load: LoadModel                            # when to fire
+    load: Optional[LoadModel] = None           # when to fire (single workload)
     workload: Workload = field(default_factory=StaticWorkload)  # what to send
+    lanes: list[BenchLane] = field(default_factory=list)
     pre_hooks: list[PreRequestHook] = field(default_factory=list)
     post_hooks: list[PostResponseHook] = field(default_factory=list)
     monitors: list[Monitor] = field(default_factory=list)  # optional periodic samplers
@@ -47,6 +67,16 @@ class BenchConfig:
     max_in_flight: int = 10000
     progress_every_s: float = 1.0
     stop_on_exhausted: bool = True
+
+    def __post_init__(self) -> None:
+        if self.lanes:
+            if self.load is not None:
+                raise ValueError("configure either load/workload or lanes, not both")
+            names = [lane.name for lane in self.lanes]
+            if len(names) != len(set(names)):
+                raise ValueError("mixed benchmark lane names must be unique")
+        elif self.load is None:
+            raise ValueError("BenchConfig requires a load model or at least one lane")
 
 
 @dataclass
@@ -73,7 +103,7 @@ class BenchRunner:
             try:
                 await self._drive(session)
             finally:
-                await self.cfg.workload.aclose()
+                await self._aclose_workloads()
                 await self.cfg.workload_type.aclose()
                 if self.cfg.recorder is not None:
                     self.cfg.recorder.close()
@@ -96,19 +126,10 @@ class BenchRunner:
             ))
 
         try:
-            async for _ in self.cfg.load.tickets():
-                try:
-                    item = await self.cfg.workload.next_item()
-                except StopAsyncIteration:
-                    if self.cfg.stop_on_exhausted:
-                        break
-                    else:
-                        continue
-
-                await sem.acquire()
-                task = asyncio.create_task(self._fire(session, item, sem))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
+            if self.cfg.lanes:
+                await self._drive_lanes(session, sem, tasks)
+            else:
+                await self._drive_single(session, sem, tasks)
         finally:
             progress_task.cancel()
             try:
@@ -124,11 +145,71 @@ class BenchRunner:
             if monitor_tasks:
                 await asyncio.gather(*monitor_tasks, return_exceptions=True)
 
+    async def _drive_single(self, session: aiohttp.ClientSession,
+                            sem: asyncio.Semaphore,
+                            tasks: set[asyncio.Task]) -> None:
+        assert self.cfg.load is not None
+        async for _ in self.cfg.load.tickets():
+            try:
+                item = await self.cfg.workload.next_item()
+            except StopAsyncIteration:
+                if self.cfg.stop_on_exhausted:
+                    break
+                continue
+
+            await sem.acquire()
+            task = asyncio.create_task(
+                self._fire(session, item, sem, self.cfg.load)
+            )
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+
+    async def _drive_lanes(self, session: aiohttp.ClientSession,
+                           sem: asyncio.Semaphore,
+                           tasks: set[asyncio.Task]) -> None:
+        """Run each lane's admission iterator concurrently.
+
+        A finite workload ends only its own lane.  Other lanes keep producing
+        tickets, which is required when one dataset is short or intentionally
+        bursty and another drives a long complementary phase.
+        """
+
+        async def produce(lane: BenchLane) -> None:
+            async for _ in lane.load.tickets():
+                try:
+                    item = await lane.workload.next_item()
+                except StopAsyncIteration:
+                    if self.cfg.stop_on_exhausted:
+                        break
+                    continue
+
+                await sem.acquire()
+                task = asyncio.create_task(
+                    self._fire(session, item, sem, lane.load, lane.name)
+                )
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+
+        producers = [asyncio.create_task(produce(lane)) for lane in self.cfg.lanes]
+        try:
+            await asyncio.gather(*producers)
+        finally:
+            for producer in producers:
+                if not producer.done():
+                    producer.cancel()
+            await asyncio.gather(*producers, return_exceptions=True)
+
     async def _fire(self, session: aiohttp.ClientSession, item: Any,
-                    sem: asyncio.Semaphore) -> None:
+                    sem: asyncio.Semaphore, load: LoadModel,
+                    lane_name: Optional[str] = None) -> None:
         start_mono = time.monotonic()
         try:
             async def fire(req: Request) -> Response:
+                if lane_name is not None:
+                    # The config-defined lane is authoritative: callers may
+                    # still attach arbitrary metadata, but cannot accidentally
+                    # collapse a mixed run into an incorrect lane.
+                    req.meta["lane"] = lane_name
                 for hook in self.cfg.pre_hooks:
                     req = await maybe_await(hook(req))
                 fire_start = time.monotonic()
@@ -145,15 +226,30 @@ class BenchRunner:
                 workload_name=self.cfg.workload_type.name,
             )
             sample = await self.cfg.workload_type.run_ticket(ctx)
+            if lane_name is not None:
+                sample.meta["lane"] = lane_name
             self.metrics.add(sample)
         except Exception as e:
             self.metrics.add(_failure_sample(
                 f"{type(e).__name__}: {e}",
                 self.cfg.workload_type.name,
+                lane_name,
             ))
         finally:
             sem.release()
-            self.cfg.load.on_complete()
+            load.on_complete()
+
+    async def _aclose_workloads(self) -> None:
+        workloads = (
+            [lane.workload for lane in self.cfg.lanes]
+            if self.cfg.lanes
+            else [self.cfg.workload]
+        )
+        closed: set[int] = set()
+        for workload in workloads:
+            if id(workload) not in closed:
+                closed.add(id(workload))
+                await workload.aclose()
 
     async def _execute(self, session: aiohttp.ClientSession, req: Request,
                        start_mono: float) -> Response:
@@ -254,12 +350,16 @@ class BenchRunner:
             out_dir,
             self.metrics,
             workload_type_name=self.cfg.workload_type.name,
-            workload_name=self.cfg.workload.name,
+            workload_name=(
+                "mix:" + ",".join(lane.name for lane in self.cfg.lanes)
+                if self.cfg.lanes else self.cfg.workload.name
+            ),
             **kwargs,
         )
 
 
-def _failure_sample(error: str, workload: str) -> Sample:
+def _failure_sample(error: str, workload: str,
+                    lane_name: Optional[str] = None) -> Sample:
     return Sample(
         start_ts=time.monotonic(),
         latency_s=0.0,
@@ -268,6 +368,7 @@ def _failure_sample(error: str, workload: str) -> Sample:
         request_ok=False,
         error=error,
         workload=workload,
+        meta={"lane": lane_name} if lane_name is not None else {},
     )
 
 

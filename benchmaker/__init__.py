@@ -19,6 +19,7 @@ from benchmaker.workloads.http import HttpWorkloadType
 from benchmaker.workloads.llm import OpenAIChatWorkloadType
 from benchmaker.workloads.sandbox import SandboxWorkloadType
 from benchmaker.workloads.hf import HFDatasetWorkload
+from benchmaker.workloads.rag import DeepRAGWorkload
 from benchmaker.workloads.sglang import SGLangGenerateWorkloadType
 from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
 from benchmaker.workloads.agent import (
@@ -59,7 +60,7 @@ from benchmaker.core.monitors import (
     PrometheusMonitor,
     parse_prometheus,
 )
-from benchmaker.core.runner import BenchRunner, BenchConfig, BenchResult
+from benchmaker.core.runner import BenchLane, BenchRunner, BenchConfig, BenchResult
 from benchmaker.core.trace import (
     ReplayWorkloadType,
     TracePacedLoad,
@@ -89,6 +90,7 @@ __all__ = [
     "OpenAIChatWorkloadType",
     "SandboxWorkloadType",
     "HFDatasetWorkload",
+    "DeepRAGWorkload",
     "SGLangGenerateWorkloadType",
     "TrajectoryReplayWorkload",
     # agent workload (pluggable user-defined agents)
@@ -136,6 +138,7 @@ __all__ = [
     # runner
     "BenchRunner",
     "BenchConfig",
+    "BenchLane",
     "BenchResult",
     # trace: record & replay
     "TraceRecorder",
@@ -153,4 +156,4 @@ __all__ = [
     "write_bundle",
 ]
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"

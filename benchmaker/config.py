@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional
 from benchmaker.env import interpolate, load_dotenv
 from benchmaker.core.load import parse_duration, parse_rate_spec
 from benchmaker.core.monitors import FunctionMonitor, Monitor, PrometheusMonitor
-from benchmaker.core.runner import BenchConfig
+from benchmaker.core.runner import BenchConfig, BenchLane
 from benchmaker.workloads.base import WorkloadType
 from benchmaker.workloads.datasets import (
     CallableWorkload,
@@ -31,6 +31,7 @@ from benchmaker.workloads.datasets import (
     Workload,
 )
 from benchmaker.workloads.hf import HFDatasetWorkload
+from benchmaker.workloads.rag import DeepRAGWorkload
 from benchmaker.workloads.http import HttpWorkloadType
 from benchmaker.workloads.llm import OpenAIChatWorkloadType
 from benchmaker.workloads.sandbox import SandboxWorkloadType
@@ -154,6 +155,8 @@ def build_workload(spec: Any) -> Workload:
         return CallableWorkload(fn=fn, **kwargs)
     if t in ("hf", "huggingface"):
         return HFDatasetWorkload(**kwargs)
+    if t in ("deeprag", "deep-rag", "rag"):
+        return DeepRAGWorkload(**kwargs)
     if t == "trajectory":
         from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
         return TrajectoryReplayWorkload(**kwargs)
@@ -365,8 +368,12 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
         cfg = interpolate(cfg)
 
     replay_spec = cfg.get("replay")
+    mix_spec = cfg.get("mix")
+    if replay_spec is not None and mix_spec is not None:
+        raise ValueError("'replay' and 'mix' are mutually exclusive")
     if replay_spec is not None:
         workload_type, workload, load_model = _build_replay(replay_spec)
+        lanes: list[BenchLane] = []
     else:
         wt_spec = cfg.get("workload_type")
         if not wt_spec:
@@ -382,16 +389,27 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
                 raise ValueError("config must define 'workload_type' or 'replay'")
 
         workload_type = build_workload_type(wt_spec)
-        workload = build_workload(cfg.get("workload"))
-
-        load_spec = cfg.get("load")
-        if load_spec is None:
-            raise ValueError("config must define 'load'")
         duration = cfg.get("duration") or cfg.get("duration_s")
         if duration is not None and isinstance(duration, str):
             duration = parse_duration(duration)
-        load_model = parse_rate_spec(load_spec, duration_s=duration,
-                                     max_requests=cfg.get("max_requests"))
+        if mix_spec is not None:
+            if cfg.get("load") is not None:
+                raise ValueError("a mixed config cannot also define top-level 'load'")
+            workload = StaticWorkload()
+            load_model = None
+            lanes = _build_lanes(
+                mix_spec,
+                duration_s=duration,
+                max_requests=cfg.get("max_requests"),
+            )
+        else:
+            workload = build_workload(cfg.get("workload"))
+            load_spec = cfg.get("load")
+            if load_spec is None:
+                raise ValueError("config must define 'load' or 'mix.lanes'")
+            load_model = parse_rate_spec(load_spec, duration_s=duration,
+                                         max_requests=cfg.get("max_requests"))
+            lanes = []
 
     pre_hooks = [resolve_callable(h) for h in (cfg.get("pre_hooks") or [])]
     post_hooks = [resolve_callable(h) for h in (cfg.get("post_hooks") or [])]
@@ -410,9 +428,11 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
     # A workload that schedules on per-request completion (e.g. interleaved
     # trajectory replay) declares the post-hook it needs; install it so a YAML
     # config can't silently stall waiting for a signal it never wired up.
-    wl_hook = workload.completion_hook()
-    if wl_hook is not None and wl_hook not in post_hooks:
-        post_hooks = list(post_hooks) + [wl_hook]
+    workloads = [lane.workload for lane in lanes] if lanes else [workload]
+    for lane_workload in workloads:
+        wl_hook = lane_workload.completion_hook()
+        if wl_hook is not None and wl_hook not in post_hooks:
+            post_hooks = list(post_hooks) + [wl_hook]
 
     recorder = _build_recorder(cfg.get("record"))
 
@@ -420,6 +440,7 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
         workload_type=workload_type,
         workload=workload,
         load=load_model,
+        lanes=lanes,
         pre_hooks=pre_hooks,
         post_hooks=post_hooks,
         monitors=monitors,
@@ -428,7 +449,46 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
         timeout_s=float(cfg.get("timeout_s", 60.0)),
         max_in_flight=int(cfg.get("max_in_flight", 10000)),
         progress_every_s=float(cfg.get("progress_every_s", 1.0)),
+        stop_on_exhausted=bool(cfg.get("stop_on_exhausted", True)),
     )
+
+
+def _build_lanes(spec: Any, *, duration_s: Optional[float],
+                 max_requests: Optional[int]) -> list[BenchLane]:
+    """Build independent workload/load pairs from a ``mix:`` YAML block."""
+    if not isinstance(spec, dict):
+        raise TypeError("'mix' must be a mapping with a 'lanes' list")
+    lane_specs = spec.get("lanes")
+    if not isinstance(lane_specs, list) or not lane_specs:
+        raise ValueError("'mix.lanes' must be a non-empty list")
+
+    lanes: list[BenchLane] = []
+    for index, lane_spec in enumerate(lane_specs):
+        if not isinstance(lane_spec, dict):
+            raise TypeError(f"mix.lanes[{index}] must be a mapping")
+        name = lane_spec.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"mix.lanes[{index}].name must be a non-empty string")
+        if "workload" not in lane_spec:
+            raise ValueError(f"mix.lanes[{index}] must define a workload")
+        rate = lane_spec.get("rate", lane_spec.get("load"))
+        if rate is None:
+            raise ValueError(f"mix.lanes[{index}] must define rate (or load)")
+
+        lane_duration = lane_spec.get("duration", duration_s)
+        if isinstance(lane_duration, str):
+            lane_duration = parse_duration(lane_duration)
+        lane_max_requests = lane_spec.get("max_requests", max_requests)
+        lanes.append(BenchLane(
+            name=name,
+            workload=build_workload(lane_spec["workload"]),
+            load=parse_rate_spec(
+                rate,
+                duration_s=lane_duration,
+                max_requests=lane_max_requests,
+            ),
+        ))
+    return lanes
 
 
 def _build_recorder(spec: Any) -> Optional[TraceRecorder]:
@@ -457,5 +517,4 @@ def _build_replay(spec: Any) -> tuple[WorkloadType, Workload, Any]:
         TraceWorkload(trace),
         TracePacedLoad(trace, speed=speed),
     )
-
 

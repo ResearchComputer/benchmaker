@@ -10,6 +10,7 @@ from benchmaker.workloads.http import HttpWorkloadType
 from benchmaker.workloads.llm import OpenAIChatWorkloadType
 from benchmaker.workloads.sandbox import SandboxWorkloadType
 from benchmaker.workloads.hf import HFDatasetWorkload
+from benchmaker.workloads.rag import DeepRAGWorkload
 from benchmaker.workloads.eval import (
     EvalWorkloadType,
     Scorer,
@@ -37,6 +38,7 @@ __all__ = [
     "OpenAIChatWorkloadType",
     "SandboxWorkloadType",
     "HFDatasetWorkload",
+    "DeepRAGWorkload",
     "EvalWorkloadType",
     "Scorer",
     "correctness_hook",

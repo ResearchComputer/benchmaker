@@ -52,64 +52,22 @@ class MetricsAggregator:
     def summary(self) -> dict:
         end = self.end_time or time.monotonic()
         wall_s = max(end - self.start_time, 1e-9)
-        ok = [s for s in self.samples if s.ok]
-        fail = [s for s in self.samples if not s.ok]
-        # Split fail into transport failures vs. delivered-but-graded-wrong.
-        wrong = [s for s in fail if s.request_ok]
-        request_failed = [s for s in fail if not s.request_ok]
-        latencies = [s.latency_s for s in ok]
+        out = _summary_for_samples(self.samples, wall_s)
 
-        status_counts = Counter(s.status for s in self.samples)
-        error_counts = Counter(s.error for s in fail if s.error)
-
-        out: dict = {
-            "wall_time_s": wall_s,
-            "total_requests": len(self.samples),
-            "success": len(ok),
-            "failed": len(fail),
-            "request_failed": len(request_failed),
-            "wrong_output": len(wrong),
-            "error_rate": (len(fail) / len(self.samples)) if self.samples else 0.0,
-            "request_failure_rate": (
-                (len(request_failed) / len(self.samples)) if self.samples else 0.0
-            ),
-            "throughput_rps": len(self.samples) / wall_s,
-            "goodput_rps": len(ok) / wall_s,
-            "bytes_sent": sum(s.bytes_sent for s in self.samples),
-            "bytes_recv": sum(s.bytes_recv for s in self.samples),
-            "status_codes": dict(status_counts),
-            "errors": dict(error_counts),
-        }
-        if latencies:
-            out["latency_s"] = {
-                "mean": statistics.mean(latencies),
-                "min": min(latencies),
-                "max": max(latencies),
-                "p50": _pct(latencies, 50),
-                "p90": _pct(latencies, 90),
-                "p95": _pct(latencies, 95),
-                "p99": _pct(latencies, 99),
-                "p999": _pct(latencies, 99.9),
+        # A mixed benchmark needs each lane's SLO signal independently.  Use
+        # the same wall-clock interval as the aggregate so lane throughput is
+        # directly comparable to the total, while latency and workload metrics
+        # remain scoped to that lane's samples.
+        lanes: dict[str, list[Sample]] = defaultdict(list)
+        for sample in self.samples:
+            lane = sample.meta.get("lane")
+            if isinstance(lane, str) and lane:
+                lanes[lane].append(sample)
+        if lanes:
+            out["lanes"] = {
+                name: _summary_for_samples(samples, wall_s)
+                for name, samples in sorted(lanes.items())
             }
-
-        # Aggregate workload-specific `extra` metrics generically: mean + percentiles.
-        extras: dict[str, list[float]] = defaultdict(list)
-        for s in ok:
-            for k, v in s.extra.items():
-                if isinstance(v, (int, float)):
-                    extras[k].append(float(v))
-        if extras:
-            ext_summary = {}
-            for k, vals in extras.items():
-                ext_summary[k] = {
-                    "mean": statistics.mean(vals),
-                    "p50": _pct(vals, 50),
-                    "p90": _pct(vals, 90),
-                    "p99": _pct(vals, 99),
-                    "min": min(vals),
-                    "max": max(vals),
-                }
-            out["workload_metrics"] = ext_summary
 
         # Monitor time-series: summarize each metric per monitor.
         if self.monitor_samples:
@@ -181,6 +139,22 @@ class MetricsAggregator:
                 lines.append(f"    {k}")
                 for kk in ("mean", "p50", "p90", "p99", "max"):
                     lines.append(f"      {kk:<6}: {v[kk]:.4f}")
+        if s.get("lanes"):
+            lines.append("")
+            lines.append("  lanes")
+            for name, lane in s["lanes"].items():
+                lines.append(
+                    f"    {name}: {lane['total_requests']} requests, "
+                    f"{lane['throughput_rps']:.2f} req/s, "
+                    f"{lane['success']} success"
+                )
+                for metric in ("ttft_s", "itl_ms_mean", "tokens_per_s"):
+                    values = lane.get("workload_metrics", {}).get(metric)
+                    if values:
+                        lines.append(
+                            f"      {metric}: p50={values['p50']:.4f}, "
+                            f"p99={values['p99']:.4f}"
+                        )
         if s.get("monitors"):
             for mon_name, mon in s["monitors"].items():
                 lines.append("")
@@ -221,6 +195,70 @@ class MetricsAggregator:
                         "elapsed_s": t,
                         "values": values,
                     }) + "\n")
+
+
+def _summary_for_samples(samples: list[Sample], wall_s: float) -> dict:
+    """Summarize a sample subset over a shared benchmark wall-clock interval."""
+    ok = [s for s in samples if s.ok]
+    fail = [s for s in samples if not s.ok]
+    # Split fail into transport failures vs. delivered-but-graded-wrong.
+    wrong = [s for s in fail if s.request_ok]
+    request_failed = [s for s in fail if not s.request_ok]
+    latencies = [s.latency_s for s in ok]
+
+    status_counts = Counter(s.status for s in samples)
+    error_counts = Counter(s.error for s in fail if s.error)
+
+    out: dict = {
+        "wall_time_s": wall_s,
+        "total_requests": len(samples),
+        "success": len(ok),
+        "failed": len(fail),
+        "request_failed": len(request_failed),
+        "wrong_output": len(wrong),
+        "error_rate": (len(fail) / len(samples)) if samples else 0.0,
+        "request_failure_rate": (
+            (len(request_failed) / len(samples)) if samples else 0.0
+        ),
+        "throughput_rps": len(samples) / wall_s,
+        "goodput_rps": len(ok) / wall_s,
+        "bytes_sent": sum(s.bytes_sent for s in samples),
+        "bytes_recv": sum(s.bytes_recv for s in samples),
+        "status_codes": dict(status_counts),
+        "errors": dict(error_counts),
+    }
+    if latencies:
+        out["latency_s"] = {
+            "mean": statistics.mean(latencies),
+            "min": min(latencies),
+            "max": max(latencies),
+            "p50": _pct(latencies, 50),
+            "p90": _pct(latencies, 90),
+            "p95": _pct(latencies, 95),
+            "p99": _pct(latencies, 99),
+            "p999": _pct(latencies, 99.9),
+        }
+
+    # Aggregate workload-specific `extra` metrics generically: mean + percentiles.
+    extras: dict[str, list[float]] = defaultdict(list)
+    for s in ok:
+        for k, v in s.extra.items():
+            if isinstance(v, (int, float)):
+                extras[k].append(float(v))
+    if extras:
+        ext_summary = {}
+        for k, vals in extras.items():
+            ext_summary[k] = {
+                "mean": statistics.mean(vals),
+                "p50": _pct(vals, 50),
+                "p90": _pct(vals, 90),
+                "p99": _pct(vals, 99),
+                "min": min(vals),
+                "max": max(vals),
+            }
+        out["workload_metrics"] = ext_summary
+
+    return out
 
 
 def _safe_meta(meta: dict) -> dict:

@@ -157,6 +157,7 @@ Full docs live in [`docs/`](docs/):
 - [Correctness / accuracy eval](docs/eval.md) — grade responses against references
 - [CLI & YAML reference](docs/cli-and-yaml.md)
 - [ShareGPT benchmark](docs/sharegpt-benchmark.md) — self-contained end-to-end walkthrough
+- [DeepRAG and mixed lanes](docs/deeprag-mix.md) — prefill-heavy RAG and phase-swinging dataset lanes
 - [SGLang benchmark](docs/sglang.md) — native SGLang `/generate` benchmark
 - [Trajectory replay](docs/trajectory-replay.md) — multi-turn prefix-cache parity replay
 
