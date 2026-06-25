@@ -353,7 +353,8 @@ def _finalize_trajectory(first_user_text: Optional[str], model: Optional[str],
 
 
 def convert_job(job_dir: Any, out_path: Any) -> int:
-    """Convert every `<trial>/agent/pi-container.log` under `job_dir` into one
+    """Convert every `<trial>/agent/pi-container.log` (legacy) **or** every
+    cleaned `<trial>.jsonl` (post-cleanjobs) under `job_dir` into one
     consolidated JSONL at `out_path` (one trajectory per line). Returns the
     number of trajectories written; empty trajectories are skipped. Writes no
     file when no logs are found."""
@@ -365,8 +366,10 @@ def convert_job(job_dir: Any, out_path: Any) -> int:
         p for pat in ("*/agent/pi-container.log", "*/agent/pi-host.log")
         for p in job_dir.glob(pat)
     )
-    if not logs:
-        log.warning("no pi-container.log/pi-host.log files found under %s", job_dir)
+    from benchmaker.swebench import trial_io
+    cleaned = [t for t in trial_io.iter_trials(job_dir) if t.layout == "cleaned"]
+    if not logs and not cleaned:
+        log.warning("no pi logs or cleaned <trial>.jsonl found under %s", job_dir)
         return 0
     n = 0
     with out_path.open("w", encoding="utf-8") as fh:
@@ -388,7 +391,28 @@ def convert_job(job_dir: Any, out_path: Any) -> int:
                 continue
             fh.write(json.dumps(traj.to_dict(), default=str) + "\n")
             n += 1
+        for t in cleaned:
+            traj = _traj_from_cleaned(t)
+            if traj is None:
+                continue
+            fh.write(json.dumps(traj.to_dict(), default=str) + "\n")
+            n += 1
     return n
+
+
+def _traj_from_cleaned(trial: Any) -> "Optional[Trajectory]":
+    """Parse a cleaned Trial's trajectory (format-dispatched), or None if empty."""
+    fmt = trial.trajectory_format
+    if fmt == "none":
+        return None
+    text = "\n".join(json.dumps(r) for r in trial.iter_trajectory())
+    traj = (parse_pi_session if fmt == "session" else parse_pi_conversation)(text)
+    traj.trial = trial.trial_name
+    if traj.instance_id is None and trial.trial_name:
+        traj.instance_id = trial.trial_name.rsplit("__", 1)[0] or None
+    if not traj.turns:
+        return None
+    return traj
 
 
 def load_store(path: Any) -> dict[str, Trajectory]:

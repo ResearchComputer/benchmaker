@@ -13,8 +13,6 @@ Usage:
 """
 import argparse
 import csv
-import glob
-import json
 import os
 import re
 import statistics as st
@@ -51,23 +49,20 @@ def _verifier_timed_out(d):
 
 
 def _trial_rows(label, root):
+    from benchmaker.swebench import trial_io
     rows = []
-    for f in glob.glob(os.path.join(root, "timeout_T*_c*", "replay_*", "*__*",
-                                    "result.json")):
-        m = CELL_RE.search(f)
+    for trial in trial_io.iter_trials(root):
+        m = CELL_RE.search(trial.path)
         if not m:
             continue
         T, C = float(m.group(1)), int(m.group(2))
-        try:
-            d = json.load(open(f))
-        except (json.JSONDecodeError, OSError):
-            continue
-        reward = ((d.get("verifier_result") or {}).get("rewards") or {}).get("reward")
+        d = trial.result
+        reward = trial.reward
         rows.append({
             "run": label,
             "T": f"{T:g}",
             "c": C,
-            "task": os.path.basename(os.path.dirname(f)).rsplit("__", 1)[0],
+            "task": trial.task_name,
             "reward": reward,
             "solved": 1 if reward == 1.0 else 0,
             "graded": 0 if reward is None else 1,

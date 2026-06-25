@@ -13,37 +13,29 @@ from __future__ import annotations
 
 import argparse
 import csv
-import glob
 import json
 import math
 import os
-import sys
 
-from benchmaker.swebench.timeout_load import accuracy_curve, recover_command_timings
+from benchmaker.swebench.timeout_load import accuracy_curve
 
 DEFAULT_TAUS = [math.inf, 300, 120, 60, 30, 20, 10, 5, 3, 2, 1, 0.5]
 
 
 def collect_tasks(jobs_dir: str) -> list[tuple[float, float, str]]:
     """Return (reward, max_duration_s, task_name) for each task in jobs_dir."""
+    from benchmaker.swebench import trial_io
     tasks: list[tuple[float, float, str]] = []
-    for tdir in sorted(glob.glob(os.path.join(jobs_dir, "*"))):
-        if not os.path.isdir(tdir):
+    for trial in sorted(trial_io.iter_trials(jobs_dir), key=lambda t: t.path):
+        d = trial.result
+        if not d:                 # malformed/unreadable result.json -> skip (matches legacy)
             continue
-        lp = os.path.join(tdir, "agent", "pi-container.log")
-        rj = os.path.join(tdir, "result.json")
-        if not (os.path.exists(lp) and os.path.exists(rj)):
-            continue
-        name = os.path.basename(tdir).rsplit("__", 1)[0]
-        timings = recover_command_timings(lp)
+        timings = trial_io.recover_command_timings_from_trial(trial)
         max_d = max((c.duration_s for c in timings), default=0.0)
-        try:
-            with open(rj) as f:
-                result_data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            print(f"warning: skipping {tdir} (unreadable result.json)", file=sys.stderr)
-            continue
-        reward = (result_data.get("verifier_result") or {}).get("rewards", {}).get("reward")
+        reward = trial.reward
+        # name from result.json/meta, else derive from the trial dir basename
+        # (matches the legacy basename().rsplit("__", 1)[0] behavior)
+        name = trial.task_name or os.path.basename(trial.path).rsplit("__", 1)[0]
         tasks.append((float(reward or 0.0), max_d, name))
     return tasks
 

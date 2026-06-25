@@ -149,6 +149,20 @@ class SWEBenchReplayRecipe(Recipe):
             click.option("--timeline/--no-timeline", "timeline", default=True,
                          show_default=True,
                          help="Capture timeline/utilization/tokens into the job dir."),
+            click.option("--fold-logs/--no-fold-logs", "fold_logs",
+                         default=lambda: os.environ.get("BENCH_FOLD_LOGS", "1") != "0",
+                         show_default="on (BENCH_FOLD_LOGS=0 to disable)",
+                         help="After each run, losslessly fold its pi-host.log "
+                              "files (drop redundant streaming/duplicate records) "
+                              "to reclaim disk during a sweep. Lossless; the "
+                              "authoritative message_end/tool_execution_end records "
+                              "are kept."),
+            click.option("--clean-jobs/--no-clean-jobs", "clean_jobs",
+                         default=lambda: os.environ.get("BENCH_CLEAN_JOBS", "1") != "0",
+                         show_default="on (BENCH_CLEAN_JOBS=0 to disable)",
+                         help="After each run, collapse each task dir into a single "
+                              "<trial>.jsonl (meta + trajectory) and delete the dir "
+                              "to reclaim disk. DESTRUCTIVE; supersedes --fold-logs."),
             click.option("--validate-observations/--no-validate-observations",
                          "validate_observations", default=False, show_default=True,
                          help="Fail-fast on environment divergence: compare each "
@@ -183,7 +197,7 @@ class SWEBenchReplayRecipe(Recipe):
             concurrency_sweep, mode, route_tools, host, port, reachable_host, model,
             dataset, exec_timeout_sec, n_tasks, task, exclude_task, n_attempts,
             timeout_multiplier, backend_type, request_timeout_sec,
-            agent_ready_timeout_sec, jobs_dir, timeline,
+            agent_ready_timeout_sec, jobs_dir, timeline, fold_logs, clean_jobs,
             utilization_interval_sec, validate_observations,
             qos_enabled, on_demand_cpu_weight, best_effort_cpu_weight,
             qos_verifier_timeout_multiplier) -> Optional[int]:
@@ -281,9 +295,14 @@ class SWEBenchReplayRecipe(Recipe):
         results: list[tuple] = []
         try:
             for c in concurrencies:
-                results.append(asyncio.run(self._run_one(
+                res = asyncio.run(self._run_one(
                     store, base_ns, c, run_model, host, port, reachable_host,
-                    timeline, utilization_interval_sec, validate_observations)))
+                    timeline, utilization_interval_sec, validate_observations))
+                results.append(res)
+                if clean_jobs:
+                    self._clean_jobs(res[-1])  # res[-1] == job_dir
+                elif fold_logs:
+                    self._fold_logs(res[-1])
         finally:
             if tmpdir is not None:
                 tmpdir.cleanup()
@@ -334,6 +353,45 @@ class SWEBenchReplayRecipe(Recipe):
                     get_divergences(app), str(job.job_dir))
         finally:
             await runner.cleanup()
+
+    @staticmethod
+    def _fold_logs(job_dir) -> None:
+        """Losslessly fold this run's pi-host.log files to reclaim disk. Best-
+        effort: never let log housekeeping fail a completed experiment."""
+        try:
+            from benchmaker.swebench.foldlogs import fold_tree
+            s = fold_tree(job_dir)
+            if s["saved_bytes"] > 0 or s["skipped"] or s["errors"]:
+                msg = (f"folded pi-host.log: "
+                       f"{s['orig_bytes']/1e9:.2f}GB -> {s['new_bytes']/1e9:.2f}GB "
+                       f"(saved {s['saved_bytes']/1e9:.2f}GB, {s['folded']} files)")
+                if s["skipped"]:
+                    msg += f"; {s['skipped']} skipped (kept intact for safety)"
+                if s["errors"]:
+                    msg += f"; {s['errors']} errors"
+                click.echo(msg)
+        except Exception as e:  # noqa: BLE001 - housekeeping must never crash the run
+            click.echo(f"warning: pi-host.log fold skipped ({e})")
+
+    @staticmethod
+    def _clean_jobs(job_dir) -> None:
+        """Collapse this run's task dirs into single <trial>.jsonl files and
+        delete the dirs. Best-effort: housekeeping must never crash a finished
+        run."""
+        try:
+            from benchmaker.swebench.cleanjobs import clean_tree
+            s = clean_tree(job_dir)
+            if s["saved_bytes"] > 0 or s["skipped"] or s["errors"]:
+                msg = (f"cleaned jobs: {s['orig_bytes']/1e9:.2f}GB -> "
+                       f"{s['new_bytes']/1e9:.2f}GB (saved {s['saved_bytes']/1e9:.2f}GB, "
+                       f"{s['cleaned']} trials)")
+                if s["skipped"]:
+                    msg += f"; {s['skipped']} skipped (kept intact for safety)"
+                if s["errors"]:
+                    msg += f"; {s['errors']} errors"
+                click.echo(msg)
+        except Exception as e:  # noqa: BLE001
+            click.echo(f"warning: jobs clean skipped ({e})")
 
 
 register(SWEBenchReplayRecipe())

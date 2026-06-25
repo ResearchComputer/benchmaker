@@ -12,7 +12,8 @@ import pytest
 
 from benchmaker.swebench.timeout_load import (
     CommandTiming, CurvePoint, accuracy_curve, effective_tau,
-    recover_command_timings, task_survives, would_time_out,
+    recover_command_timings, recover_command_timings_from_records,
+    task_survives, would_time_out,
 )
 
 
@@ -175,3 +176,19 @@ def test_collect_tasks_skips_missing_and_malformed(tmp_path):
     tasks = cli.collect_tasks(str(tmp_path))
     # only the well-formed task survives; name is the part before "__"
     assert tasks == [(1.0, 2.5, "good")]
+
+
+def _msg_end(role, ts, tools=()):
+    content = [{"type": "toolCall", "name": t} for t in tools]
+    return {"type": "message_end",
+            "message": {"role": role, "timestamp": ts, "content": content}}
+
+
+def test_from_records_matches_file(tmp_path):
+    records = [_msg_end("assistant", 1000, tools=["bash"]),
+               _msg_end("toolResult", 2500)]
+    log = tmp_path / "pi-container.log"
+    log.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    from_file = recover_command_timings(log)
+    from_recs = recover_command_timings_from_records(records)
+    assert from_recs == from_file == [CommandTiming("bash", 1.5)]

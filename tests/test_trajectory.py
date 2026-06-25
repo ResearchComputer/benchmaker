@@ -405,3 +405,40 @@ def test_parse_captures_tool_results_aligned_by_id():
     traj = parse_pi_conversation(log)
     assert traj.turns[0].tool_results == [{"name": "bash", "status": 1}]
     assert traj.turns[-1].tool_results == []
+
+
+def test_convert_job_legacy_vs_cleaned(tmp_path):
+    """convert_job must produce the same number of trajectories from a legacy job
+    dir and its cleaned equivalent, with matching trial keys and turn counts."""
+    import json
+    from benchmaker.swebench import cleanjobs as cj
+    from benchmaker.swebench.trajectory import convert_job
+    from tests._cleanjobs_fixtures import make_pi_host_trial, make_pi_container_trial
+
+    leg, cl = tmp_path / "leg", tmp_path / "cl"
+    for root in (leg, cl):
+        make_pi_host_trial(str(root))
+        make_pi_container_trial(str(root))
+
+    leg_out, cl_out = tmp_path / "leg.jsonl", tmp_path / "cl.jsonl"
+    n_leg = convert_job(leg, leg_out)
+    cj.clean_tree(str(cl))
+    n_cl = convert_job(cl, cl_out)
+
+    assert n_leg == n_cl == 2
+
+    # to_dict() emits "trial" (the trial dir name) — use it as the grouping key
+    KEY = "trial"
+    leg_recs = {json.loads(x)[KEY]: json.loads(x)
+                for x in leg_out.read_text().splitlines() if x.strip()}
+    cl_recs = {json.loads(x)[KEY]: json.loads(x)
+               for x in cl_out.read_text().splitlines() if x.strip()}
+
+    assert set(leg_recs) == set(cl_recs), (
+        f"trial key mismatch: legacy={set(leg_recs)} cleaned={set(cl_recs)}"
+    )
+    for t in leg_recs:
+        assert len(leg_recs[t]["turns"]) == len(cl_recs[t]["turns"]) > 0, (
+            f"turn count mismatch for trial {t!r}: "
+            f"legacy={len(leg_recs[t]['turns'])} cleaned={len(cl_recs[t]['turns'])}"
+        )

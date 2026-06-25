@@ -91,3 +91,23 @@ def test_backfill_file_adds_fields_and_is_idempotent(tmp_path):
     B.backfill_file(src, jobs_root=tmp_path)
     rows2 = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
     assert rows2 == rows
+
+
+# --------------------------- both-layouts lookup --------------------------- #
+
+def test_status_for_record_legacy_and_cleaned(tmp_path):
+    from benchmaker.swebench import cleanjobs as cj
+    from tests._cleanjobs_fixtures import make_pi_host_trial
+    job = tmp_path / "jobs" / "job1"
+    make_pi_host_trial(str(job))   # -> jobs/job1/django__django-11999__K75PXvM/
+    jobs_root = tmp_path / "jobs"
+    rec = {"trial": "django__django-11999__K75PXvM", "turns": []}
+
+    legacy = B.status_for_record(dict(rec), jobs_root)
+    assert legacy["status_source"] == "result_json"
+    assert legacy["exit_status"] == "ok"
+    assert legacy["completed"] is True
+
+    cj.clean_tree(str(job))         # collapse to jobs/job1/<trial>.jsonl
+    cleaned = B.status_for_record(dict(rec), jobs_root)
+    assert cleaned == legacy        # same authoritative status from the cleaned file

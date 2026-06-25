@@ -54,23 +54,27 @@ def _load_collector():
 _C = _load_collector()
 
 
-def trial_result_dir(trial: str, jobs_root: Path) -> Optional[Path]:
-    """The ``jobs_root/*/<trial>`` dir that still has a ``result.json``, or None."""
-    for rj in sorted(jobs_root.glob(f"*/{trial}/result.json")):
-        return rj.parent
+def _find_trial(trial: str, jobs_root: Path):
+    """The Trial for ``trial`` under jobs_root, in either layout, or None."""
+    from benchmaker.swebench import trial_io
+    for rj in sorted(jobs_root.glob(f"*/{trial}/result.json")):   # legacy dir
+        return trial_io.load_trial(str(rj.parent))
+    for jf in sorted(jobs_root.glob(f"*/{trial}.jsonl")):         # cleaned file
+        return trial_io.load_trial(str(jf))
     return None
 
 
 def status_for_record(rec: dict[str, Any], jobs_root: Path) -> dict[str, Any]:
     """Completion fields for one already-collected record.
 
-    Authoritative from the trial's ``result.json`` when its job dir survives,
-    else inferred from the record's stored last turn.
+    Authoritative from the trial's ``result.json`` (legacy dir) or embedded
+    result in a cleaned ``.jsonl`` when available; else inferred from the
+    record's stored last turn.
     """
     trial = rec.get("trial")
-    tdir = trial_result_dir(trial, jobs_root) if trial else None
-    if tdir is not None:
-        exit_status = _C._read_exit_status(tdir)
+    t = _find_trial(trial, jobs_root) if trial else None
+    if t is not None:
+        exit_status = _C._exit_status_from_result(t.result)
         if exit_status is not None:
             termination = _C._TERMINATION_BY_EXIT.get(exit_status, "error")
             return {"exit_status": exit_status, "termination": termination,

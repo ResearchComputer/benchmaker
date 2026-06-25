@@ -439,3 +439,29 @@ def test_summarise_out_counts_total_and_passed(tmp_path):
         + "\n"  # blank line ignored
         + json.dumps({"instance_id": "c", "passed": True}) + "\n")
     assert C._summarise_out(out) == (3, 2)
+
+
+# --------------------------- cleaned <trial>.jsonl ------------------------- #
+
+def test_collect_from_job_dir_legacy_vs_cleaned(tmp_path):
+    # build a job dir with one pi-host + one pi-container trial, collect on the
+    # legacy layout, then clean a COPY and collect again; records must match on
+    # all stable fields.
+    from benchmaker.swebench import cleanjobs as cj
+    from tests._cleanjobs_fixtures import make_pi_host_trial, make_pi_container_trial
+    leg = str(tmp_path / "leg"); cl = str(tmp_path / "cl")
+    for root in (leg, cl):
+        make_pi_host_trial(root)
+        make_pi_container_trial(root)
+    legacy = {r["trial"]: r for r in C.collect_from_job_dir(leg)}
+    cj.clean_tree(cl)
+    cleaned = {r["trial"]: r for r in C.collect_from_job_dir(cl)}
+    assert set(legacy) == set(cleaned)
+    KEYS = ["instance_id", "mode", "reward", "passed", "resolved",
+            "fail_to_pass", "pass_to_pass", "exit_status", "termination",
+            "completed", "status_source"]
+    for t in legacy:
+        for k in KEYS:
+            assert legacy[t].get(k) == cleaned[t].get(k), (t, k)
+        # same number of parsed turns
+        assert len(legacy[t]["turns"]) == len(cleaned[t]["turns"]) > 0

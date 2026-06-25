@@ -8,24 +8,14 @@ Cell directories are named timeout_T{T:g}_c{C} under --out-root, matching the
 normalization the shell loop applies when it creates them.
 """
 import argparse
-import glob
-import json
 import os
 
 
-def _reward(result_json):
-    try:
-        with open(result_json) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-    return (data.get("verifier_result") or {}).get("rewards", {}).get("reward")
-
-
 def _solved(jobs_dir):
+    from benchmaker.swebench import trial_io
     solved = total = 0
-    for rj in glob.glob(os.path.join(jobs_dir, "**", "result.json"), recursive=True):
-        r = _reward(rj)
+    for trial in trial_io.iter_trials(jobs_dir):
+        r = trial.reward
         if r is None:
             continue
         total += 1
@@ -37,25 +27,17 @@ def _spans(jobs_dir, T):
     # A real exec timeout shows up as a bridge span with rc<0 whose duration
     # ran up to the wall; rc<0 with ~0 duration is an instant exec error, not a
     # timeout, so gate on duration to avoid conflating the two.
+    from benchmaker.swebench import trial_io
     durs, n_exec, n_timeout = [], 0, 0
-    for sp in glob.glob(os.path.join(jobs_dir, "**", "timeline-spans.jsonl"),
-                        recursive=True):
-        with open(sp) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("name") != "sandbox_exec":
-                    continue
-                d = float(obj.get("duration_s") or 0.0)
-                n_exec += 1
-                durs.append(d)
-                if int(obj.get("rc", 0)) < 0 and d >= 0.9 * T:
-                    n_timeout += 1
+    for trial in trial_io.iter_trials(jobs_dir):
+        for obj in trial.timeline_spans:
+            if obj.get("name") != "sandbox_exec":
+                continue
+            d = float(obj.get("duration_s") or 0.0)
+            n_exec += 1
+            durs.append(d)
+            if int(obj.get("rc", 0)) < 0 and d >= 0.9 * T:
+                n_timeout += 1
     durs.sort()
     mean = sum(durs) / len(durs) if durs else 0.0
     p95 = durs[int(0.95 * (len(durs) - 1))] if durs else 0.0

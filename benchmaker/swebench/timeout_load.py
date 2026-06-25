@@ -45,6 +45,30 @@ class CommandTiming:
     duration_s: float
 
 
+def recover_command_timings_from_records(records) -> list[CommandTiming]:
+    """Per-command wall-times from already-parsed pi log records (the message_end
+    event stream). Same semantics as recover_command_timings, but over an iterable
+    of dicts instead of a file."""
+    timings: list[CommandTiming] = []
+    pending: tuple[int, str] | None = None  # (assistant_ts_ms, tool_name)
+    for obj in records:
+        if not isinstance(obj, dict) or obj.get("type") != "message_end":
+            continue
+        msg = obj.get("message", {})
+        role = msg.get("role")
+        ts = msg.get("timestamp")
+        if role == "assistant":
+            tools = [c.get("name") for c in msg.get("content", [])
+                     if c.get("type") == "toolCall"]
+            pending = (ts, tools[0]) if (ts is not None and tools) else None
+        elif role == "toolResult" and pending is not None:
+            a_ts, tool = pending
+            if a_ts is not None and ts is not None:
+                timings.append(CommandTiming(tool, (ts - a_ts) / 1000.0))
+            pending = None
+    return timings
+
+
 def recover_command_timings(log_path: str | Path) -> list[CommandTiming]:
     """Per-command wall-times from a pi-container agent log (JSONL).
 
@@ -54,29 +78,9 @@ def recover_command_timings(log_path: str | Path) -> list[CommandTiming]:
     If an assistant message contains multiple toolCalls, only the first is
     attributed; parallel calls are not modelled.
     """
-    timings: list[CommandTiming] = []
-    pending: tuple[int, str] | None = None  # (assistant_ts_ms, tool_name)
     with open(log_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if obj.get("type") != "message_end":
-                continue
-            msg = obj.get("message", {})
-            role = msg.get("role")
-            ts = msg.get("timestamp")
-            if role == "assistant":
-                tools = [c.get("name") for c in msg.get("content", [])
-                         if c.get("type") == "toolCall"]
-                pending = (ts, tools[0]) if (ts is not None and tools) else None
-            elif role == "toolResult" and pending is not None:
-                a_ts, tool = pending
-                if a_ts is not None and ts is not None:
-                    timings.append(CommandTiming(tool, (ts - a_ts) / 1000.0))
-                pending = None
-    return timings
+        recs = (json.loads(line) for line in f if line.strip())
+        return recover_command_timings_from_records(recs)
 
 
 @dataclass(frozen=True)

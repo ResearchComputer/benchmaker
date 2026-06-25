@@ -109,3 +109,21 @@ def test_pi_container_loopback_fails_fast():
                                    "--trajectories", "nonexistent.jsonl"])
     assert res.exit_code != 0
     assert "pi-container" in res.output and "reachable-host" in res.output
+
+
+def test_clean_jobs_flag_in_help():
+    cmd = make_command(get("swebench-replay"))
+    out = CliRunner().invoke(cmd, ["--help"]).output
+    assert "--clean-jobs" in out
+
+
+def test_clean_jobs_method_cleans_tree(tmp_path):
+    import os
+    from benchmaker.recipes.swebench_replay import SWEBenchReplayRecipe
+    from tests._cleanjobs_fixtures import make_pi_host_trial
+    make_pi_host_trial(str(tmp_path))
+    SWEBenchReplayRecipe._clean_jobs(str(tmp_path))
+    assert os.path.exists(os.path.join(str(tmp_path),
+                                       "django__django-11999__K75PXvM.jsonl"))
+    assert not os.path.isdir(os.path.join(str(tmp_path),
+                                          "django__django-11999__K75PXvM"))

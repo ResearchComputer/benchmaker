@@ -201,16 +201,21 @@ def _trial_session_log(trial_dir: Path) -> Optional[Path]:
     return cands[-1] if cands else None
 
 
+def _mode_from_result_data(data: Optional[dict]) -> Optional[str]:
+    """pi execution mode from a parsed ``result.json`` dict (the session log
+    can't tell host from container on its own)."""
+    md = (data.get("agent_result") or {}).get("metadata") if isinstance(data, dict) else None
+    meta_mode = md.get("mode") if isinstance(md, dict) else None
+    return _MODE_BY_META.get(meta_mode) if isinstance(meta_mode, str) else None
+
+
 def _mode_from_result(trial_dir: Path) -> Optional[str]:
-    """pi execution mode from ``result.json`` metadata (the session log can't
-    tell host from container on its own)."""
+    """pi execution mode from ``result.json`` metadata (legacy file path)."""
     try:
         data = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
     except Exception:
         return None
-    md = (data.get("agent_result") or {}).get("metadata") if isinstance(data, dict) else None
-    meta_mode = md.get("mode") if isinstance(md, dict) else None
-    return _MODE_BY_META.get(meta_mode) if isinstance(meta_mode, str) else None
+    return _mode_from_result_data(data)
 
 
 def _instance_id_from_config(trial_dir: Path) -> Optional[str]:
@@ -233,29 +238,39 @@ def _read_reward(trial_dir: Path) -> Optional[float]:
         return None
 
 
-def _read_report(trial_dir: Path) -> dict[str, Any]:
-    """Best-effort ``resolved`` + FAIL_TO_PASS/PASS_TO_PASS counts from report.json."""
+def _report_fields(rep: Optional[dict]) -> dict[str, Any]:
+    """``resolved`` + FAIL_TO_PASS/PASS_TO_PASS counts from ONE report inner dict."""
     out: dict[str, Any] = {}
+    if not isinstance(rep, dict):
+        return out
+    if isinstance(rep.get("resolved"), bool):
+        out["resolved"] = rep["resolved"]
+    ts = rep.get("tests_status")
+    if isinstance(ts, dict):
+        for field, key in (("FAIL_TO_PASS", "fail_to_pass"),
+                           ("PASS_TO_PASS", "pass_to_pass")):
+            bucket = ts.get(field)
+            if isinstance(bucket, dict) and isinstance(bucket.get("success"), list):
+                out[key] = len(bucket["success"])
+    return out
+
+
+def _read_report(trial_dir: Path) -> dict[str, Any]:
+    """Best-effort ``resolved`` + FAIL_TO_PASS/PASS_TO_PASS counts from report.json.
+
+    Legacy file path: report.json is keyed by instance id; take the first inner
+    dict and delegate to :func:`_report_fields`.
+    """
     try:
         data = json.loads((trial_dir / "verifier" / "report.json").read_text(encoding="utf-8"))
     except Exception:
-        return out
+        return {}
     if not isinstance(data, dict):
-        return out
+        return {}
     for rep in data.values():  # report is keyed by instance id; take the first
-        if not isinstance(rep, dict):
-            continue
-        if isinstance(rep.get("resolved"), bool):
-            out["resolved"] = rep["resolved"]
-        ts = rep.get("tests_status")
-        if isinstance(ts, dict):
-            for field, key in (("FAIL_TO_PASS", "fail_to_pass"),
-                               ("PASS_TO_PASS", "pass_to_pass")):
-                bucket = ts.get(field)
-                if isinstance(bucket, dict) and isinstance(bucket.get("success"), list):
-                    out[key] = len(bucket["success"])
-        break
-    return out
+        if isinstance(rep, dict):
+            return _report_fields(rep)
+    return {}
 
 
 # The agent's raw ``exit_status`` (see ``benchmaker.swebench.pi_agent``) mapped
@@ -264,8 +279,8 @@ def _read_report(trial_dir: Path) -> dict[str, Any]:
 _TERMINATION_BY_EXIT = {"ok": "completed", "time_limit": "timeout"}
 
 
-def _read_exit_status(trial_dir: Path) -> Optional[str]:
-    """Raw agent ``exit_status`` from ``result.json`` (None if unavailable).
+def _exit_status_from_result(data: Optional[dict]) -> Optional[str]:
+    """Raw agent ``exit_status`` from a parsed ``result.json`` dict.
 
     harbor records the agent's own status under ``agent_result.metadata`` —
     ``"ok"`` (the agent stopped on its own), ``"time_limit"`` (killed at the
@@ -273,10 +288,6 @@ def _read_exit_status(trial_dir: Path) -> Optional[str]:
     A top-level ``exception_info`` is a harbor-level error even when no agent
     status was recorded.
     """
-    try:
-        data = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
-    except Exception:
-        return None
     if not isinstance(data, dict):
         return None
     md = (data.get("agent_result") or {}).get("metadata")
@@ -286,6 +297,15 @@ def _read_exit_status(trial_dir: Path) -> Optional[str]:
     if data.get("exception_info") is not None:
         return "error"
     return None
+
+
+def _read_exit_status(trial_dir: Path) -> Optional[str]:
+    """Raw agent ``exit_status`` from ``result.json`` (legacy file path)."""
+    try:
+        data = json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return _exit_status_from_result(data)
 
 
 def _termination_from_finish(finish_reason: Optional[str],
@@ -312,14 +332,14 @@ def _termination_from_last_turn(traj: Any) -> str:
     return _termination_from_finish(last.finish_reason, bool(last.tool_calls))
 
 
-def _completion_fields(trial_dir: Path, traj: Any) -> dict[str, Any]:
-    """The completion-status block fused onto a record.
+def _completion_fields_from_status(exit_status: Optional[str],
+                                   traj: Any) -> dict[str, Any]:
+    """The completion-status block, given an already-resolved ``exit_status``.
 
-    Authoritative from ``result.json`` when present (``status_source`` =
+    Authoritative when ``exit_status`` is not None (``status_source`` =
     ``result_json``); otherwise inferred from the trajectory's last turn
     (``inferred``) — coarser, since inference cannot split timeout from error.
     """
-    exit_status = _read_exit_status(trial_dir)
     if exit_status is not None:
         termination = _TERMINATION_BY_EXIT.get(exit_status, "error")
         source = "result_json"
@@ -333,6 +353,11 @@ def _completion_fields(trial_dir: Path, traj: Any) -> dict[str, Any]:
         "completed": termination == "completed",
         "status_source": source,
     }
+
+
+def _completion_fields(trial_dir: Path, traj: Any) -> dict[str, Any]:
+    """The completion-status block fused onto a record (legacy file path)."""
+    return _completion_fields_from_status(_read_exit_status(trial_dir), traj)
 
 
 def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
@@ -372,12 +397,44 @@ def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
     return rec
 
 
+def _collect_cleaned_trial(trial: Any) -> Optional[dict[str, Any]]:
+    """Build the same graded-trajectory record from a cleaned ``Trial``.
+
+    Mirrors :func:`_collect_trial` but sources every field from the cleaned
+    single-file layout via ``trial_io`` rather than from on-disk trial files.
+    """
+    fmt = trial.trajectory_format
+    if fmt == "none":
+        return None
+    text = "\n".join(json.dumps(r) for r in trial.iter_trajectory())
+    parse = parse_pi_session if fmt == "session" else parse_pi_conversation
+    traj = parse(text)
+    if not traj.turns:
+        return None
+    task = trial.config.get("task") or {}
+    path = task.get("path") if isinstance(task, dict) else None
+    iid = ((PurePosixPath(path).name if isinstance(path, str) and path else None)
+           or traj.instance_id or (trial.trial_name.rsplit("__", 1)[0] or None))
+    rec = traj.to_dict()
+    rec["trial"] = trial.trial_name
+    rec["instance_id"] = iid
+    rec["mode"] = _mode_from_result_data(trial.result)
+    rec["reward"] = trial.reward
+    rec["passed"] = trial.reward is not None and trial.reward >= 1.0
+    rec.update(_report_fields(trial.report))
+    rec.update(_completion_fields_from_status(
+        _exit_status_from_result(trial.result), traj))
+    return rec
+
+
 def collect_from_job_dir(job_dir: Any) -> list[dict[str, Any]]:
     """Walk a harbor job dir and return one graded-trajectory record per trial.
 
-    A trial subdir is any directory containing an ``agent/`` subdir. Trials with
-    no parsable pi turns are skipped (logged). Defensive throughout: a corrupt or
-    missing file degrades a single field/trial, never raises.
+    A legacy trial subdir is any directory containing an ``agent/`` subdir;
+    cleaned trials are ``<trial>.jsonl`` files (the legacy subdirs are gone). A
+    job dir is one layout or the other, so the two passes never double-count.
+    Trials with no parsable pi turns are skipped (logged). Defensive throughout:
+    a corrupt or missing file degrades a single field/trial, never raises.
     """
     job_dir = Path(job_dir)
     records: list[dict[str, Any]] = []
@@ -386,6 +443,13 @@ def collect_from_job_dir(job_dir: Any) -> list[dict[str, Any]]:
         rec = _collect_trial(trial_dir)
         if rec is not None:
             records.append(rec)
+    # cleaned single-file trials (<trial>.jsonl); legacy trees have none
+    from benchmaker.swebench import trial_io
+    for trial in trial_io.iter_trials(job_dir):
+        if trial.layout == "cleaned":
+            rec = _collect_cleaned_trial(trial)
+            if rec is not None:
+                records.append(rec)
     return records
 
 
