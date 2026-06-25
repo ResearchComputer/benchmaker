@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${EXCLUDE_TASKS:=psf__requests-2317 scikit-learn__scikit-learn-14710 sphinx-doc__sphinx-7590}"
 : "${TIMEOUTS:= 5 10 20}"
 : "${CONCURRENCIES:=16}"
+# Flash Sandbox backend the replay requests (forwarded as
+# environment.kwargs.backend_type). "docker" preserves prior behavior; set to
+# "firecracker" to run the sweep on microVMs (requires an FC-capable node).
+: "${BACKEND_TYPE:=docker}"
 # When 1, replay fails fast on environment divergence (a live tool-result status
 # that differs from the recording), so a command that times out under a tight
 # --exec-timeout-sec counts as a task failure. This is what makes the pass rate
@@ -57,6 +61,7 @@ fi
 echo "Real timeout x concurrency sweep (pi-host)  n_tasks=${N_TASKS}"
 echo "  T grid:           ${TIMEOUTS}"
 echo "  concurrency grid: ${CONCURRENCIES}"
+echo "  backend:          ${BACKEND_TYPE}"
 echo "  excluding:        ${EXCLUDE_TASKS:-<none>}"
 echo "  validate-observations: ${VALIDATE_OBSERVATIONS}"
 if [ "${QOS_ENABLED}" = "1" ]; then
@@ -82,6 +87,7 @@ for T in ${TIMEOUTS}; do
             --mode pi-host \
             --route-tools all \
             --exec-timeout-sec "${T}" \
+            --backend-type "${BACKEND_TYPE}" \
             --concurrency "${C}" \
             --reachable-host "${REACHABLE_HOST}" \
             --host 0.0.0.0 \

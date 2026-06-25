@@ -21,6 +21,8 @@
 # _ExecBridge, so exporting it before the benchmaker call is sufficient.
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- config (override via env) ---------------------------------------------
 : "${FLASH_SANDBOX_URL:=http://100.71.204.79:8080}"
 : "${REACHABLE_HOST:=100.101.144.78}"
@@ -56,70 +58,8 @@ done
 
 # --- predicted (Tier-1) vs actual (Tier-2) summary -------------------------
 echo "=== predicted (strict Tier-1) vs actual (Tier-2) solved ==="
-OUT_ROOT="${OUT_ROOT}" python3 - "${BENCH_INJECT_TIMEOUT_S}" "${C1_DIR}" ${LOAD_FACTORS} <<'PY'
-import glob
-import json
-import math
-import os
-import sys
-
-from benchmaker.swebench.timeout_load import accuracy_curve, recover_command_timings
-
-T = float(sys.argv[1])
-c1_dir = sys.argv[2]
-load_factors = [float(x) for x in sys.argv[3:]]
-out_root = os.environ.get("OUT_ROOT", "jobs")
-
-
-def _reward(result_json):
-    try:
-        with open(result_json) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-    return (data.get("verifier_result") or {}).get("rewards", {}).get("reward")
-
-
-# Tier-1 baseline tasks (reward, max_command_duration) from the uncontended c1 run.
-c1_tasks = []
-for tdir in glob.glob(os.path.join(c1_dir, "*")):
-    lp = os.path.join(tdir, "agent", "pi-container.log")
-    rj = os.path.join(tdir, "result.json")
-    if not (os.path.exists(lp) and os.path.exists(rj)):
-        continue
-    max_d = max((c.duration_s for c in recover_command_timings(lp)), default=0.0)
-    r = _reward(rj)
-    if r is None:
-        continue
-    c1_tasks.append((float(r or 0.0), max_d))
-
-
-def predicted_solved(L):
-    tau = math.inf if L <= 1 else T / L
-    return accuracy_curve(c1_tasks, [tau])[0].n_solved if c1_tasks else None
-
-
-def actual_solved(jobs_dir):
-    # Recurse: --jobs-dir output layout may nest task dirs one level down.
-    solved = total = 0
-    for rj in glob.glob(os.path.join(jobs_dir, "**", "result.json"), recursive=True):
-        r = _reward(rj)
-        if r is None:
-            continue
-        total += 1
-        solved += 1 if r == 1.0 else 0
-    return solved, total
-
-
-print(f"{'L':>6} {'tau(s)':>7} {'predicted':>10} {'actual':>10}")
-for L in load_factors:
-    tau = "inf" if L <= 1 else f"{T / L:g}"
-    pred = predicted_solved(L)
-    jobs_dir = os.path.join(out_root, f"loadfactor_L{L:g}")
-    if os.path.isdir(jobs_dir):
-        s, n = actual_solved(jobs_dir)
-        actual = f"{s}/{n}" if n else "(empty)"
-    else:
-        actual = "(not run)"
-    print(f"{L:>6g} {tau:>7} {str(pred):>10} {actual:>10}")
-PY
+OUT_ROOT="${OUT_ROOT}" python3 "${SCRIPT_DIR}/summarize_loadfactor_sweep.py" \
+    --out-root "${OUT_ROOT}" \
+    --inject-timeout "${BENCH_INJECT_TIMEOUT_S}" \
+    --c1-dir "${C1_DIR}" \
+    --load-factors ${LOAD_FACTORS}
