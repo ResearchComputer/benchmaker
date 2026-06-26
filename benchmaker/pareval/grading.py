@@ -5,6 +5,7 @@ metric definitions from the ParEval paper (pass@k via Chen et al. unbiased
 estimator; speedup@k / efficiency@k via expected-max over k samples).
 """
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -110,3 +111,112 @@ def sample_speedup(
     speedup = baseline / best_parallel_time
     n_resources = _config_resources(best.get("config", {}), parallelism_model)
     return (speedup, n_resources)
+
+
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """Unbiased Chen et al. (HumanEval) estimator: 1 - C(n-c, k)/C(n, k)."""
+    if k <= 0:
+        return 0.0
+    if c <= 0:
+        return 0.0
+    if n - c < k:           # more correct than failures-left allow -> guaranteed hit
+        return 1.0
+    # 1 - prod_{i=n-c+1..n} (1 - k/i)  == 1 - C(n-c,k)/C(n,k)
+    prod = 1.0
+    for i in range(n - c + 1, n + 1):
+        prod *= 1.0 - k / i
+    return 1.0 - prod
+
+
+def expected_max_at_k(values: list[float], k: int) -> float:
+    """Expected maximum of a uniformly random size-k subset drawn WITHOUT
+    replacement from `values`. Incorrect samples must already be encoded as 0.0."""
+    n = len(values)
+    if n == 0 or k <= 0:
+        return 0.0
+    if k >= n:
+        return max(values)
+    vs = sorted(values)
+    denom = math.comb(n, k)
+    total = 0.0
+    for i, v in enumerate(vs):       # i = count of elements strictly below position i
+        # v is the max of a k-subset iff the other k-1 are drawn from the i below it
+        total += v * math.comb(i, k - 1)
+    return total / denom
+
+
+def _mean(xs: list[float]) -> float:
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _sample_efficiency(s: "SampleResult") -> float:
+    """Efficiency value encoding for a sample (0.0 if incorrect / unavailable)."""
+    if not s.correct or s.speedup is None or not s.best_n_resources:
+        return 0.0
+    return s.speedup / s.best_n_resources
+
+
+def _sample_speedup_value(s: "SampleResult") -> float:
+    """Speedup value encoding for a sample (0.0 if incorrect / unavailable)."""
+    if not s.correct or s.speedup is None:
+        return 0.0
+    return s.speedup
+
+
+def _slice_metrics(slc: list["SampleResult"], ks: list[int]) -> dict:
+    """Compute the metric block for one slice (list of SampleResults)."""
+    by_name: dict[str, list[SampleResult]] = {}
+    for s in slc:
+        by_name.setdefault(s.name, []).append(s)
+
+    n_samples = len(slc)
+    n_problems = len(by_name)
+    build_rate = _mean([1.0 if s.built else 0.0 for s in slc])
+    correct_rate = _mean([1.0 if s.correct else 0.0 for s in slc])
+
+    pass_block: dict[int, float] = {}
+    speedup_block: dict[int, float] = {}
+    efficiency_block: dict[int, float] = {}
+    for k in ks:
+        pass_vals: list[float] = []
+        speedup_vals: list[float] = []
+        efficiency_vals: list[float] = []
+        for group in by_name.values():
+            n = len(group)
+            c = sum(1 for s in group if s.correct)
+            pass_vals.append(pass_at_k(n, c, k))
+            sp_list = [_sample_speedup_value(s) for s in group]
+            eff_list = [_sample_efficiency(s) for s in group]
+            speedup_vals.append(expected_max_at_k(sp_list, k))
+            efficiency_vals.append(expected_max_at_k(eff_list, k))
+        pass_block[k] = _mean(pass_vals)
+        speedup_block[k] = _mean(speedup_vals)
+        efficiency_block[k] = _mean(efficiency_vals)
+
+    return {
+        "n_problems": n_problems,
+        "n_samples": n_samples,
+        "build_rate": build_rate,
+        "correct_rate": correct_rate,
+        "pass@k": pass_block,
+        "speedup@k": speedup_block,
+        "efficiency@k": efficiency_block,
+    }
+
+
+def aggregate(samples: list["SampleResult"], ks: list[int]) -> dict:
+    """Aggregate per-sample results into overall / per-model / per-type slices.
+
+    Pure: does not add a ``trusted`` flag (the caller injects that later).
+    """
+    by_model: dict[str, list[SampleResult]] = {}
+    by_type: dict[str, list[SampleResult]] = {}
+    for s in samples:
+        by_model.setdefault(s.parallelism_model, []).append(s)
+        by_type.setdefault(s.problem_type, []).append(s)
+
+    return {
+        "overall": _slice_metrics(samples, ks),
+        "by_model": {m: _slice_metrics(g, ks) for m, g in by_model.items()},
+        "by_problem_type": {t: _slice_metrics(g, ks) for t, g in by_type.items()},
+    }
