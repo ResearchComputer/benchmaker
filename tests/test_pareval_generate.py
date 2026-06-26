@@ -78,3 +78,19 @@ async def test_generate_one_records_error_on_send_failure():
     rec = await generate_one(boom, PROMPT, sample_idx=0)
     assert rec["error"] and "model down" in rec["error"]
     assert rec.get("generated_code") in (None, "")
+
+
+from benchmaker.pareval.generate import _build_chat_request, make_send_fn
+
+def test_build_chat_request_shape():
+    url, headers, body = _build_chat_request(
+        "https://api.x/v1", "m1", "secret", 0.2,
+        [{"role": "user", "content": "hi"}])
+    assert url.endswith("/chat/completions")
+    assert headers["Authorization"] == "Bearer secret"
+    assert body["model"] == "m1" and body["temperature"] == 0.2
+    assert body["messages"][0]["content"] == "hi"
+
+def test_make_send_fn_returns_callable():
+    fn = make_send_fn(api_base="https://api.x/v1", model="m", api_key="k", temperature=0.0)
+    assert callable(fn)

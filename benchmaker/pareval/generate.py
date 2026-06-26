@@ -89,3 +89,58 @@ async def generate_one(
         return rec
     rec["generated_code"] = assemble_generated_code(prompt.prompt, code)
     return rec
+
+
+def _build_chat_request(
+    api_base: str,
+    model: str,
+    api_key: Optional[str],
+    temperature: float,
+    messages: list[dict],
+) -> tuple[str, dict, dict]:
+    """Return (url, headers, json_body) for an OpenAI-compatible chat request."""
+    url = api_base.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False,
+    }
+    return url, headers, body
+
+
+def make_send_fn(
+    *,
+    api_base: str,
+    model: str,
+    api_key: Optional[str],
+    temperature: float,
+) -> Callable[[list[dict]], Awaitable[tuple[str, Optional[dict]]]]:
+    """Return an async (messages) -> (text, usage) that POSTs to chat/completions."""
+    import aiohttp
+
+    from benchmaker.swebench.agent import parse_openai_usage
+
+    async def send_fn(messages: list[dict]) -> tuple[str, Optional[dict]]:
+        url, headers, body = _build_chat_request(
+            api_base, model, api_key, temperature, messages
+        )
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, headers=headers, json=body) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
+                    raise RuntimeError(f"model endpoint HTTP {resp.status}: {excerpt}")
+                import json as _json
+
+                data = _json.loads(text)
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"model endpoint returned no choices: {data!r}")
+        content = (choices[0].get("message") or {}).get("content") or ""
+        return content, parse_openai_usage(data)
+
+    return send_fn
