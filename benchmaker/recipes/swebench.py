@@ -274,6 +274,10 @@ class SWEBenchRecipe(Recipe):
             agent_config_file=agent_config_file,
             n_tasks=n_tasks,
             task=list(task),
+            # _build_job_config reads args.exclude_task; this recipe has no
+            # --exclude-task flag (task selection is the CSV/--task list), but
+            # the field must exist or the builder raises AttributeError.
+            exclude_task=[],
             concurrency=concurrency,
             n_attempts=n_attempts,
             timeout_multiplier=timeout_multiplier,
