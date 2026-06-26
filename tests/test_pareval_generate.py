@@ -54,3 +54,27 @@ def test_assemble_strips_preamble_the_model_re_emitted():
 def test_patch_no_inline_inserts_after_return_type():
     assert patch_no_inline("double closestPair(std::vector<Point> const& p) {") == \
         "double NO_INLINE closestPair(std::vector<Point> const& p) {"
+
+
+from benchmaker.pareval.dataset import ParEvalPrompt
+from benchmaker.pareval.generate import generate_one
+
+PROMPT = ParEvalPrompt(name="x", problem_type="t", language="cpp",
+                       parallelism_model="omp",
+                       prompt="int sum(std::vector<int> const& v) {")
+
+async def test_generate_one_extracts_and_assembles():
+    async def fake_send(messages):
+        return ("```cpp\nint sum(std::vector<int> const& v) { return 0; }\n```", None)
+    rec = await generate_one(fake_send, PROMPT, sample_idx=2)
+    assert rec["name"] == "x" and rec["sample_idx"] == 2
+    assert rec["error"] is None
+    assert "NO_INLINE" in rec["generated_code"]
+    assert rec["generated_code"].count("sum(") == 1
+
+async def test_generate_one_records_error_on_send_failure():
+    async def boom(messages):
+        raise RuntimeError("model down")
+    rec = await generate_one(boom, PROMPT, sample_idx=0)
+    assert rec["error"] and "model down" in rec["error"]
+    assert rec.get("generated_code") in (None, "")
