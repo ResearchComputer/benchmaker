@@ -159,8 +159,9 @@ class ParEvalRecipe(Recipe):
                 "exclusive_cpus",
                 default=False,
                 show_default=True,
-                help="Pin runs to exclusive CPUs (required for trusted "
-                "speedup numbers).",
+                help="Assert the sandbox cpuset is exclusively allocated; "
+                "only flips the 'trusted' flag on speedup/efficiency metrics "
+                "(does not itself change pinning).",
             ),
             click.option(
                 "--cpuset",
@@ -242,45 +243,10 @@ class ParEvalRecipe(Recipe):
         out_dir_opt,
     ) -> Optional[int]:
         # Import lazily so the recipe registry doesn't pull heavy deps eagerly.
-        from benchmaker.pareval.run import ParEvalConfig, run_pareval
+        from benchmaker.pareval.run import run_pareval
 
         if shared.dotenv:
             load_dotenv(shared.dotenv)
-
-        sandbox_url = (
-            sandbox_url
-            or os.environ.get("FLASH_SANDBOX_URL")
-            or os.environ.get("FLASH_SANDBOX_HOST")
-        )
-        api_base = (
-            api_base
-            or os.environ.get("OPENAI_API_BASE_URL")
-            or os.environ.get("OPENAI_API_BASE")
-        )
-        api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        model = (
-            model
-            or os.environ.get("OPENAI_COMPATIBLE_MODEL")
-            or os.environ.get("OPENAI_MODEL")
-        )
-
-        # Exactly one generation source: live model XOR a completions file.
-        has_model = bool(model)
-        has_completions = bool(completions)
-        if has_model == has_completions:
-            raise click.UsageError(
-                "pass --model (live generation) OR --completions <file>, "
-                "not both/neither."
-            )
-        if not sandbox_url:
-            raise click.UsageError(
-                "set --sandbox-url or FLASH_SANDBOX_URL (grading needs it)."
-            )
-
-        parallelism = tuple(
-            p.strip() for p in parallelism_models.split(",") if p.strip()
-        )
-        k_values = tuple(int(x.strip()) for x in k.split(",") if x.strip())
 
         if out_dir_opt is None:
             stamp = (
@@ -291,24 +257,18 @@ class ParEvalRecipe(Recipe):
         out_path = Path(out_dir_opt)
         out_path.mkdir(parents=True, exist_ok=True)
 
-        cfg = ParEvalConfig(
-            out_dir=out_path,
-            parallelism_models=parallelism,
-            problem_types=tuple(problem_type) or None,
-            names=tuple(problem) or None,
-            num_samples=num_samples,
-            k=k_values,
-            completions_path=(Path(completions) if completions else None),
-            model=(model if has_model else None),
+        params = dict(
+            model=model,
             api_base=api_base,
             api_key=api_key,
-            temperature=temperature,
-            regenerate=regenerate,
+            completions=completions,
             sandbox_url=sandbox_url,
-            image=image,
-            endpoint_prefix=endpoint_prefix,
-            sandbox_drivers_cpp=sandbox_drivers_cpp,
-            kokkos_root=kokkos_root,
+            parallelism_models=parallelism_models,
+            problem_type=problem_type,
+            problem=problem,
+            num_samples=num_samples,
+            k=k,
+            temperature=temperature,
             max_threads=max_threads,
             max_procs=max_procs,
             run_reps=run_reps,
@@ -317,17 +277,117 @@ class ParEvalRecipe(Recipe):
             concurrency=concurrency,
             exclusive_cpus=exclusive_cpus,
             cpuset=cpuset,
+            image=image,
+            sandbox_drivers_cpp=sandbox_drivers_cpp,
+            kokkos_root=kokkos_root,
+            endpoint_prefix=endpoint_prefix,
+            regenerate=regenerate,
         )
+        cfg = _build_config(params, dict(os.environ), out_path)
 
-        source = f"model={model}" if has_model else f"completions={completions}"
+        source = (
+            f"model={cfg.model}"
+            if cfg.model
+            else f"completions={completions}"
+        )
         click.echo(
-            f"pareval: {source} parallelism={','.join(parallelism)} "
-            f"sandbox={sandbox_url} out={out_path}"
+            f"pareval: {source} "
+            f"parallelism={','.join(cfg.parallelism_models)} "
+            f"sandbox={cfg.sandbox_url} out={out_path}"
         )
 
         metrics = asyncio.run(run_pareval(cfg))
         _print_summary(metrics, out_path)
         return None
+
+
+def _build_config(params: dict, env: dict, out_dir) -> "object":
+    """Resolve env fallbacks, validate the generation source, and build a
+    :class:`ParEvalConfig`.
+
+    Generation source is exactly one of a live model or a precomputed
+    completions file. When ``--completions`` is supplied we treat completions
+    as the source and do NOT resolve ``model`` from the environment, so a
+    user with ``$OPENAI_MODEL`` set can still pass ``--completions`` without a
+    spurious conflict. Only an *explicit* ``--model`` conflicts with
+    ``--completions``. Raises :class:`click.UsageError` on a bad source or a
+    missing sandbox URL.
+    """
+    from benchmaker.pareval.run import ParEvalConfig
+
+    completions = params.get("completions")
+    has_completions = bool(completions)
+    explicit_model = params.get("model")
+
+    if has_completions and explicit_model:
+        raise click.UsageError(
+            "pass --model (live generation) OR --completions <file>, not both."
+        )
+    if has_completions:
+        model = None
+    else:
+        model = (
+            explicit_model
+            or env.get("OPENAI_COMPATIBLE_MODEL")
+            or env.get("OPENAI_MODEL")
+        )
+        if not model:
+            raise click.UsageError(
+                "pass --model (live generation) OR --completions <file>, "
+                "not neither."
+            )
+
+    sandbox_url = (
+        params.get("sandbox_url")
+        or env.get("FLASH_SANDBOX_URL")
+        or env.get("FLASH_SANDBOX_HOST")
+    )
+    if not sandbox_url:
+        raise click.UsageError(
+            "set --sandbox-url or FLASH_SANDBOX_URL (grading needs it)."
+        )
+
+    api_base = (
+        params.get("api_base")
+        or env.get("OPENAI_API_BASE_URL")
+        or env.get("OPENAI_API_BASE")
+    )
+    api_key = params.get("api_key") or env.get("OPENAI_API_KEY")
+
+    parallelism = tuple(
+        p.strip() for p in params["parallelism_models"].split(",") if p.strip()
+    )
+    k_values = tuple(
+        int(x.strip()) for x in params["k"].split(",") if x.strip()
+    )
+
+    return ParEvalConfig(
+        out_dir=Path(out_dir),
+        parallelism_models=parallelism,
+        problem_types=tuple(params.get("problem_type") or ()) or None,
+        names=tuple(params.get("problem") or ()) or None,
+        num_samples=params["num_samples"],
+        k=k_values,
+        completions_path=(Path(completions) if completions else None),
+        model=model,
+        api_base=api_base,
+        api_key=api_key,
+        temperature=params["temperature"],
+        regenerate=params["regenerate"],
+        sandbox_url=sandbox_url,
+        image=params["image"],
+        endpoint_prefix=params["endpoint_prefix"],
+        sandbox_drivers_cpp=params["sandbox_drivers_cpp"],
+        kokkos_root=params["kokkos_root"],
+        max_threads=params["max_threads"],
+        max_procs=params["max_procs"],
+        run_reps=params["run_reps"],
+        build_timeout=params["build_timeout"],
+        run_timeout=params["run_timeout"],
+        concurrency=params["concurrency"],
+        exclusive_cpus=params["exclusive_cpus"],
+        cpuset=params["cpuset"],
+    )
 
 
 def _print_summary(metrics: dict, out_dir: Path) -> None:

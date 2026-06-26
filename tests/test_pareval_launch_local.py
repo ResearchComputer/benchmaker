@@ -16,7 +16,7 @@ def test_kokkos_command():
 
 def test_mpi_command_binds_ranks():
     cmd = build_run_command("mpi", "/x/a.out", {"num_procs": 8}, "0-7")
-    assert cmd == "mpirun --bind-to core -n 8 /x/a.out"
+    assert cmd == "taskset -c 0-7 mpirun --bind-to core -n 8 /x/a.out"
 
 def test_unknown_model_raises():
     with pytest.raises(ValueError):

@@ -46,7 +46,7 @@ asyncio.run(main())
 
 Or via the CLI. Workload-specific benchmarks are exposed as **recipes** —
 `benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`,
-`swebench-replay`, `sglang`, `trajectory-replay`):
+`swebench-replay`, `sglang`, `trajectory-replay`, `pareval`):
 
 ```bash
 benchmaker http --url https://httpbin.org/get --rate poisson:50 --duration 10s
@@ -252,7 +252,7 @@ benchmaker/          # library code
     hf.py            #   HuggingFace dataset source
     datasets.py      #   generic workload/dataset base classes
     base.py          #   WorkloadType base class
-  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, trajectory-replay) + registry
+  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, trajectory-replay, pareval) + registry
   swebench/
     trajectory.py    #   convert pi logs to replay trajectories
     replay_server.py #   mock-LLM replay server for swebench-replay

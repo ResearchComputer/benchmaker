@@ -77,5 +77,5 @@ def build_run_command(
         )
     if parallelism_model == "mpi":
         np_ = run_config["num_procs"]
-        return f"mpirun --bind-to core -n {np_} {exec_path}"
+        return f"taskset -c {cpuset} mpirun --bind-to core -n {np_} {exec_path}"
     raise ValueError(f"unknown parallelism_model: {parallelism_model!r}")

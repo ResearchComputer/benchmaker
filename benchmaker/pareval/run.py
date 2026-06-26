@@ -138,19 +138,14 @@ async def _stage_grade(cfg: ParEvalConfig, completions_file: Path, runs_file: Pa
             try:
                 result = await _grade_one(rec)
             except Exception as e:  # noqa: BLE001 - infra error must not kill the run
+                # Transient infra failure: log and DO NOT persist. Leaving this
+                # sample out of runs.jsonl re-queues it on the next resume rather
+                # than permanently marking it done with a bogus build_err.
                 print(
                     f"[pareval] grade failed for {_completion_key(rec)}: {e}",
                     file=sys.stderr,
                 )
-                result = SampleResult(
-                    name=rec.get("name", ""),
-                    parallelism_model=rec.get("parallelism_model", ""),
-                    problem_type=rec.get("problem_type", ""),
-                    sample_idx=rec.get("sample_idx", 0),
-                    built=False,
-                    correct=False,
-                    build_err=f"infra: {e}",
-                )
+                return
         async with write_lock:
             with runs_file.open("a") as f:
                 f.write(json.dumps(dataclasses.asdict(result)) + "\n")

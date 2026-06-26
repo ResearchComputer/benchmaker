@@ -106,3 +106,31 @@ async def test_resume_skips_already_graded(tmp_path, monkeypatch):
     # sample 1 graded (its tmpdir path mentions -1), sample 0 not re-graded
     assert any("-omp-1" in p for p in graded_idxs)
     assert not any("-omp-0" in p for p in graded_idxs)
+
+
+async def test_infra_exception_not_persisted_for_resume(tmp_path, monkeypatch):
+    # A sample whose grading raises an infra exception must NOT be appended to
+    # runs.jsonl (so a re-run re-queues it), while a sibling that succeeds IS.
+    class FlakyFlash(FakeFlash):
+        async def write_file(self, path, content):
+            # Raise an infra error only for sample idx 1 (its tmpdir path
+            # mentions -omp-1); sample 0 grades normally.
+            if "-omp-1" in path:
+                raise RuntimeError("sandbox exploded")
+            return None
+
+    monkeypatch.setattr("benchmaker.pareval.run.FlashSandbox", FlakyFlash)
+    out = tmp_path / "out"
+    _write_completions(
+        (tmp_path / "in.jsonl"), [_completion(idx=0), _completion(idx=1)]
+    )
+    cfg = ParEvalConfig(
+        out_dir=out, parallelism_models=("omp",), num_samples=2, k=(1,),
+        completions_path=tmp_path / "in.jsonl", sandbox_url="http://x",
+    )
+    await run_pareval(cfg)
+    runs = [json.loads(l) for l in (out / "runs.jsonl").read_text().splitlines() if l.strip()]
+    keys = {(r["name"], r["parallelism_model"], r["sample_idx"]) for r in runs}
+    # sample 0 succeeded -> present; sample 1 raised -> absent (re-queued)
+    assert ("03_dense_la_axpy", "omp", 0) in keys
+    assert ("03_dense_la_axpy", "omp", 1) not in keys
