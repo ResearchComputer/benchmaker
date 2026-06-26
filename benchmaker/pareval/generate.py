@@ -24,6 +24,9 @@ def split_preamble(prompt_stub: str) -> tuple[str, str]:
 
 
 def patch_no_inline(signature_line: str) -> str:
+    # Mirrors upstream ParEval patch_prompt's parts.insert(1, "NO_INLINE"):
+    # NO_INLINE goes after the return type; multi-qualifier GPU signatures
+    # (e.g. CUDA `__global__ void`) are a deferred concern.
     parts = signature_line.split(" ")
     if len(parts) < 2:
         return signature_line
@@ -33,12 +36,20 @@ def patch_no_inline(signature_line: str) -> str:
 def assemble_generated_code(prompt_stub: str, completion: str) -> str:
     preamble, sig = split_preamble(prompt_stub)
     sig_key = sig.split("(")[0].strip()
-    if sig_key and sig_key in completion:
-        c_lines = completion.splitlines()
+    c_lines = completion.splitlines()
+    start = None
+    if sig_key:
+        # Match the line that *starts with* the signature key (a leading
+        # comment that merely mentions the function name must not match).
         start = next((i for i, ln in enumerate(c_lines)
-                      if sig_key in ln and "(" in ln), 0)
-        body_after_sig = "\n".join(c_lines[start + 1:])
-        func = patch_no_inline(c_lines[start]) + "\n" + body_after_sig
+                      if ln.lstrip().startswith(sig_key) and "(" in ln), None)
+    if start is not None:
+        # Keep any pre-signature lines the model added (e.g. comments) but
+        # drop lines that merely re-emit the stub preamble.
+        preamble_set = set(preamble.splitlines())
+        kept_pre = [ln for ln in c_lines[:start] if ln not in preamble_set]
+        func_lines = kept_pre + [patch_no_inline(c_lines[start])] + c_lines[start + 1:]
+        func = "\n".join(func_lines)
     else:
         func = patch_no_inline(sig) + "\n" + completion
     return (preamble + "\n" if preamble else "") + func
@@ -124,23 +135,38 @@ def make_send_fn(
 
     from benchmaker.swebench.agent import parse_openai_usage
 
+    session: Optional[aiohttp.ClientSession] = None
+
+    def _get_session() -> aiohttp.ClientSession:
+        nonlocal session
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+        return session
+
     async def send_fn(messages: list[dict]) -> tuple[str, Optional[dict]]:
         url, headers, body = _build_chat_request(
             api_base, model, api_key, temperature, messages
         )
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(url, headers=headers, json=body) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
-                    raise RuntimeError(f"model endpoint HTTP {resp.status}: {excerpt}")
-                import json as _json
+        sess = _get_session()
+        async with sess.post(url, headers=headers, json=body) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
+                raise RuntimeError(f"model endpoint HTTP {resp.status}: {excerpt}")
+            import json as _json
 
-                data = _json.loads(text)
+            data = _json.loads(text)
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"model endpoint returned no choices: {data!r}")
         content = (choices[0].get("message") or {}).get("content") or ""
         return content, parse_openai_usage(data)
 
+    async def _aclose() -> None:
+        nonlocal session
+        if session is not None and not session.closed:
+            await session.close()
+        session = None
+
+    send_fn.aclose = _aclose
     return send_fn

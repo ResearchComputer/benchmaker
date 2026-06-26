@@ -94,3 +94,20 @@ def test_build_chat_request_shape():
 def test_make_send_fn_returns_callable():
     fn = make_send_fn(api_base="https://api.x/v1", model="m", api_key="k", temperature=0.0)
     assert callable(fn)
+
+
+def test_assemble_skips_comment_containing_sig_key():
+    stub = "int foo(int x) {"
+    completion = "// computes int foo(int x) fast\nint foo(int x) { return x; }"
+    src = assemble_generated_code(stub, completion)
+    assert src.count("int foo(") == 1
+    assert "NO_INLINE" in src
+    # the comment line must NOT be treated as the signature:
+    assert src.count("// computes") <= 1
+    assert "NO_INLINE //" not in src and "// computes int NO_INLINE" not in src
+
+
+async def test_send_fn_has_aclose_and_is_reusable():
+    fn = make_send_fn(api_base="https://api.x/v1", model="m", api_key="k", temperature=0.0)
+    assert callable(fn) and hasattr(fn, "aclose")
+    await fn.aclose()   # safe to call even if no session was ever created
