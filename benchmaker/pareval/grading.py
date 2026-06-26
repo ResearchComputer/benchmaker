@@ -7,6 +7,7 @@ estimator; speedup@k / efficiency@k via expected-max over k samples).
 
 import math
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -65,6 +66,7 @@ class SampleResult:
     per_config: list[dict] = field(default_factory=list)
     speedup: float | None = None
     best_n_resources: int | None = None
+    build_err: Optional[str] = None
 
 
 def _config_resources(config: dict, parallelism_model: str) -> int:
