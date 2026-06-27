@@ -461,6 +461,11 @@ class PiHostAgent(_PiAgentBase):
                 self._write_log("pi-host", (out or b"").decode("utf-8", "replace"))
             except asyncio.TimeoutError:
                 proc.kill()
+                # Reap the killed child so its subprocess transport is closed
+                # within the running loop. Without this, the transport is GC'd
+                # after asyncio.run() closes the loop and its __del__ raises
+                # "RuntimeError: Event loop is closed" (mirrors agent.py:_bash).
+                await proc.wait()
                 exit_status = "time_limit"
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("pi-host run failed: %s", exc)
@@ -600,8 +605,15 @@ class _ExecBridge:
             timeout = (min(float(req_timeout), self._exec_timeout_s)
                        if req_timeout is not None else self._exec_timeout_s)
             self.count += 1
-            # Anchor at cwd without a subshell (matches the other agents).
-            full = f"cd {shlex.quote(self._cwd)} && {command}" if self._cwd else command
+            # Anchor at cwd and run via a LOGIN shell (bash -lc), mirroring
+            # PiContainerAgent. SWE-bench images activate the per-instance
+            # `testbed` conda env (and set PATH/venv) from the login files
+            # (/etc/profile + ~/.bashrc); a bare `sh -c` never sources those, so
+            # the agent would run against base Python and hit ModuleNotFoundError
+            # while trying to run the suite (issue #12). shlex.quote keeps the
+            # inner cd+command a single argument, so quoting is unchanged.
+            inner = f"cd {shlex.quote(self._cwd)} && {command}" if self._cwd else command
+            full = f"bash -lc {shlex.quote(inner)}"
             start = datetime.now(timezone.utc)
             try:
                 # Enforce the per-command budget client-side as well as passing

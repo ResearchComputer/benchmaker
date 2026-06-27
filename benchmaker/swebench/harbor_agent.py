@@ -33,6 +33,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any, Optional
 
@@ -192,9 +193,17 @@ class BenchmakerHostAgent(BaseAgent):
         cwd = self._cwd
 
         async def executor(action: str, timeout_s: float) -> tuple[int, str]:
-            # Anchor at cwd without a subshell — `(...)` breaks trailing
-            # heredocs, and several env backends ignore the exec `cwd` field.
-            full = f"cd {cwd} && {action}" if cwd else action
+            # Anchor at cwd and run via a LOGIN shell (bash -lc). SWE-bench
+            # images activate the per-instance `testbed` conda env (and set
+            # PATH/venv) from the login files (/etc/profile + ~/.bashrc); a bare
+            # `sh -c` never sources those, so the loop would run against base
+            # Python and hit ModuleNotFoundError running the suite (issue #12).
+            # We avoid a `( ... )` subshell (it breaks trailing heredocs, and
+            # several env backends ignore the exec `cwd` field); `bash -lc`
+            # passes the whole cd+action as one quoted argument, so heredocs
+            # parse normally and quoting is unchanged.
+            inner = f"cd {cwd} && {action}" if cwd else action
+            full = f"bash -lc {shlex.quote(inner)}"
             try:
                 res = await environment.exec(
                     command=full, cwd=cwd, timeout_sec=int(timeout_s),

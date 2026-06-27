@@ -237,9 +237,61 @@ async def test_exec_bridge_forwards_to_environment():
 
     assert body == {"return_code": 0, "stdout": "ok-out", "stderr": ""}
     assert bridge.count == 1
-    # command is anchored at cwd and the per-call timeout is honoured.
-    assert env.calls[0]["command"] == "cd /testbed && ls -la"
+    # Command is anchored at cwd and wrapped in a LOGIN shell (bash -lc), so the
+    # per-instance SWE-bench env setup in /etc/profile + ~/.bashrc runs first
+    # (e.g. `conda activate testbed`). A bare `sh -c` would skip those and run
+    # against base Python -> ModuleNotFoundError (issue #12). The per-call
+    # timeout is honoured.
+    assert env.calls[0]["command"] == "bash -lc 'cd /testbed && ls -la'"
     assert env.calls[0]["timeout"] == 7
+
+
+async def test_exec_bridge_uses_login_shell_for_env_activation():
+    """Regression for issue #12: routed commands must run via a login shell.
+
+    SWE-bench images activate the per-instance ``testbed`` conda env (and set
+    PATH/venv) from the login files (``/etc/profile`` / ``~/.bashrc``), which a
+    non-login ``sh -c`` never sources. The bridge must therefore wrap every
+    routed command in ``bash -lc`` (mirroring PiContainerAgent), with the inner
+    ``cd <cwd> && <command>`` quoted as a single argument.
+    """
+    import aiohttp
+    import shlex
+
+    env = _FakeEnv()
+    bridge = P._ExecBridge(env, cwd="/testbed", exec_timeout_s=42.0)
+    await bridge.start()
+    try:
+        async with aiohttp.ClientSession() as sess:
+            # A command with shell metacharacters must survive the wrapping intact.
+            async with sess.post(f"{bridge.url}/exec",
+                                 json={"command": "python -m pytest && echo 'done'"}) as r:
+                await r.json()
+    finally:
+        await bridge.stop()
+
+    sent = env.calls[0]["command"]
+    assert sent.startswith("bash -lc ")
+    # The argument to `bash -lc` is exactly the cd+command, single-quoted safely.
+    inner = sent[len("bash -lc "):]
+    assert shlex.split(inner)[0] == "cd /testbed && python -m pytest && echo 'done'"
+
+
+async def test_exec_bridge_login_shell_without_cwd():
+    """With no cwd, still use a login shell (just the bare command, no `cd`)."""
+    import aiohttp
+
+    env = _FakeEnv()
+    bridge = P._ExecBridge(env, cwd="", exec_timeout_s=42.0)
+    await bridge.start()
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(f"{bridge.url}/exec", json={"command": "ls -la"}) as r:
+                await r.json()
+    finally:
+        await bridge.stop()
+
+    assert env.calls[0]["command"] == "bash -lc 'ls -la'"
 
 
 async def test_exec_bridge_surfaces_environment_error():
