@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import shlex
@@ -461,11 +462,14 @@ class PiHostAgent(_PiAgentBase):
                 self._write_log("pi-host", (out or b"").decode("utf-8", "replace"))
             except asyncio.TimeoutError:
                 proc.kill()
-                # Reap the killed child so its subprocess transport is closed
-                # within the running loop. Without this, the transport is GC'd
-                # after asyncio.run() closes the loop and its __del__ raises
-                # "RuntimeError: Event loop is closed" (mirrors agent.py:_bash).
-                await proc.wait()
+                # Reap the killed child *inside* the loop's lifetime so its
+                # subprocess transport is closed while the loop is still running.
+                # Otherwise BaseSubprocessTransport lingers until GC, which runs
+                # after asyncio.run() has closed the loop -> a flood of "Event
+                # loop is closed" tracebacks from BaseSubprocessTransport.__del__
+                # at interpreter shutdown (mirrors agent.py:_bash).
+                with contextlib.suppress(Exception):
+                    await proc.wait()
                 exit_status = "time_limit"
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("pi-host run failed: %s", exc)

@@ -7,8 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${REACHABLE_HOST:=100.71.204.79}"
 : "${TRAJECTORIES:=.local/pi-host-traj-v1-500.jsonl}"
 : "${N_TASKS:=500}"
-: "${EXCLUDE_TASKS:=psf__requests-2317 scikit-learn__scikit-learn-14710 sphinx-doc__sphinx-7590}"
-: "${TIMEOUTS:= 5 10 20}"
+: "${EXCLUDE_TASKS:=sphinx-doc__sphinx-7590 scikit-learn__scikit-learn-14710}"
+: "${TIMEOUTS:=10}"
 : "${CONCURRENCIES:=16}"
 # Flash Sandbox backend the replay requests (forwarded as
 # environment.kwargs.backend_type). "docker" preserves prior behavior; set to
