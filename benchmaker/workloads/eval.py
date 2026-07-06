@@ -36,6 +36,7 @@ from benchmaker.core.types import (
     TicketContext,
     maybe_await,
 )
+from benchmaker.workloads._sse import reassemble_sse_lines
 from benchmaker.workloads.base import WorkloadType
 
 
@@ -115,18 +116,20 @@ def extract_openai_text(response: Response) -> str:
     parts: list[str] = []
     chunks = response.stream_chunks
     if chunks:
-        for raw in chunks:
-            for line in raw.splitlines():
-                line = line.strip()
-                if line.startswith(b"data:"):
-                    line = line[5:].strip()
-                if not line or line == b"[DONE]":
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                _collect_openai_text(obj, parts)
+        # Reassemble across chunk boundaries: a content delta split by an
+        # arbitrary byte boundary would otherwise be dropped, silently
+        # truncating the extracted answer used for correctness scoring (#13).
+        for line, _ in reassemble_sse_lines(chunks, response.stream_chunk_times):
+            line = line.strip()
+            if line.startswith(b"data:"):
+                line = line[5:].strip()
+            if not line or line == b"[DONE]":
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            _collect_openai_text(obj, parts)
         return "".join(parts)
 
     if not response.body:

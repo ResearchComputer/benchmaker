@@ -208,9 +208,12 @@ def _build_job_config(args: argparse.Namespace) -> JobConfig:
         kwargs=agent_kwargs,
     )
 
+    # exclude_task is only set by the swebench-replay recipe's namespace; the
+    # swebench recipe and harbor_eval's own CLI omit it, so read defensively
+    # (matching the getattr() guards for jobs_dir / qos_enabled below).
     dataset = DatasetConfig(name=args.dataset, n_tasks=args.n_tasks,
                             task_names=args.task or None,
-                            exclude_task_names=args.exclude_task or None)
+                            exclude_task_names=getattr(args, "exclude_task", None) or None)
 
     # Parent directory for the run bundle (harbor writes to <jobs_dir>/<job_name>).
     # Omit when unset so harbor keeps its own default of "jobs".

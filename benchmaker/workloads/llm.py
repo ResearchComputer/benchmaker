@@ -19,13 +19,23 @@ Captured metrics (on top of base latency/throughput):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import statistics
 from typing import Any, Optional, Union
 
 from benchmaker.env import load_dotenv
 from benchmaker.core.types import Request, Response, Sample
+from benchmaker.workloads._sse import reassemble_sse_lines
 from benchmaker.workloads.base import WorkloadType
+
+_logger = logging.getLogger(__name__)
+
+# Guards a one-time warning: an endpoint that never returns a `usage` block (or
+# whose usage we failed to read) silently zeroes prompt/cached-token accounting,
+# which is the dangerous failure mode for cache-effectiveness runs. Warn once
+# rather than per request.
+_warned_missing_usage = False
 
 
 # Env vars recognised by `OpenAIChatWorkloadType.from_env`.
@@ -227,41 +237,51 @@ class OpenAIChatWorkloadType(WorkloadType):
         prompt_tokens: Optional[int] = None
         cached_tokens: Optional[int] = None
         finish_reason: Optional[str] = None
+        usage_seen = False
 
-        for raw, t in zip(chunks, chunk_times):
-            for line in raw.splitlines():
-                if not line:
-                    continue
-                line = line.strip()
-                if line.startswith(b"data:"):
-                    line = line[5:].strip()
-                if line == b"[DONE]":
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                if obj.get("usage"):
-                    u = obj["usage"]
-                    if u.get("completion_tokens") is not None:
-                        usage_completion_tokens = int(u["completion_tokens"])
-                    if u.get("prompt_tokens") is not None:
-                        prompt_tokens = int(u["prompt_tokens"])
-                    details = u.get("prompt_tokens_details")
-                    if isinstance(details, dict) and details.get("cached_tokens") is not None:
-                        cached_tokens = int(details["cached_tokens"])
-                    elif u.get("cached_tokens") is not None:
-                        cached_tokens = int(u["cached_tokens"])
-                for ch in obj.get("choices") or []:
-                    delta = ch.get("delta") or {}
-                    if delta.get("content"):
-                        if ttft is None:
-                            ttft = t
-                        token_arrival_times.append(t)
-                    if ch.get("finish_reason"):
-                        finish_reason = ch["finish_reason"]
+        # Reassemble across chunk boundaries first: aiohttp yields bytes at
+        # arbitrary offsets, so the final `usage` event is often split in two and
+        # would be silently dropped if each chunk were parsed on its own (#13).
+        for line, t in reassemble_sse_lines(chunks, chunk_times):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(b"data:"):
+                line = line[5:].strip()
+            if line == b"[DONE]":
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("usage"):
+                usage_seen = True
+                u = obj["usage"]
+                if u.get("completion_tokens") is not None:
+                    usage_completion_tokens = int(u["completion_tokens"])
+                if u.get("prompt_tokens") is not None:
+                    prompt_tokens = int(u["prompt_tokens"])
+                details = u.get("prompt_tokens_details")
+                if isinstance(details, dict) and details.get("cached_tokens") is not None:
+                    cached_tokens = int(details["cached_tokens"])
+                elif u.get("cached_tokens") is not None:
+                    cached_tokens = int(u["cached_tokens"])
+            for ch in obj.get("choices") or []:
+                delta = ch.get("delta") or {}
+                if delta.get("content"):
+                    if ttft is None:
+                        ttft = t
+                    token_arrival_times.append(t)
+                if ch.get("finish_reason"):
+                    finish_reason = ch["finish_reason"]
+
+        # Loud-but-once diagnostic: a benchmark that requested usage yet parsed
+        # none produces a structurally-zero cache hit rate — surface it instead
+        # of silently recording misleading metrics.
+        if response.ok and not usage_seen:
+            _warn_missing_usage_once(request)
 
         completion_tokens = (
             usage_completion_tokens
@@ -289,7 +309,7 @@ class OpenAIChatWorkloadType(WorkloadType):
         # Dataset workloads can provide a pre-run prompt-size estimate and a
         # RAG packing depth through Request.meta. Preserve them as numeric
         # metrics even when an endpoint omits usage information.
-        for metric in ("prompt_tokens_hint", "rag_depth"):
+        for metric in ("prompt_tokens_hint", "prefix_tokens_hint", "rag_depth"):
             value = request.meta.get(metric)
             if isinstance(value, (int, float)):
                 sample.extra[metric] = float(value)
@@ -306,6 +326,28 @@ class OpenAIChatWorkloadType(WorkloadType):
             sample.error = sample.error or "no tokens received"
 
         return sample
+
+
+def _warn_missing_usage_once(request: Request) -> None:
+    """Warn once if the request asked for usage but the response carried none.
+
+    Only fires when ``stream_options.include_usage`` was set on the request, so
+    endpoints that were never asked for usage don't trigger noise.
+    """
+    global _warned_missing_usage
+    if _warned_missing_usage:
+        return
+    body = request.json if isinstance(request.json, dict) else {}
+    if not (body.get("stream_options") or {}).get("include_usage"):
+        return
+    _warned_missing_usage = True
+    _logger.warning(
+        "openai-chat: requested stream_options.include_usage but no usage block "
+        "was parsed from the streamed response; prompt_tokens/cached_tokens will "
+        "be absent and prefix-cache hit rate will read as 0. Check that the "
+        "endpoint emits a usage event (e.g. SGLang needs --enable-cache-report). "
+        "Further identical warnings are suppressed."
+    )
 
 
 def _pct(xs: list[float], p: float) -> float:

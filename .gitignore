@@ -25,3 +25,4 @@ logs/
 .omx/
 scripts/
 analysis/
+.rcc/

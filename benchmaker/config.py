@@ -32,6 +32,7 @@ from benchmaker.workloads.datasets import (
 )
 from benchmaker.workloads.hf import HFDatasetWorkload
 from benchmaker.workloads.rag import DeepRAGWorkload
+from benchmaker.workloads.tracelab import TraceLabWorkload
 from benchmaker.workloads.http import HttpWorkloadType
 from benchmaker.workloads.llm import OpenAIChatWorkloadType
 from benchmaker.workloads.sandbox import SandboxWorkloadType
@@ -157,6 +158,8 @@ def build_workload(spec: Any) -> Workload:
         return HFDatasetWorkload(**kwargs)
     if t in ("deeprag", "deep-rag", "rag"):
         return DeepRAGWorkload(**kwargs)
+    if t in ("tracelab", "trace-lab", "trace"):
+        return TraceLabWorkload(**kwargs)
     if t == "trajectory":
         from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
         return TrajectoryReplayWorkload(**kwargs)

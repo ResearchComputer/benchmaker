@@ -46,7 +46,7 @@ asyncio.run(main())
 
 Or via the CLI. Workload-specific benchmarks are exposed as **recipes** —
 `benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`,
-`swebench-replay`, `sglang`, `trajectory-replay`, `pareval`):
+`swebench-replay`, `sglang`, `trajectory-replay`, `pareval`, `tracelab`):
 
 ```bash
 benchmaker http --url https://httpbin.org/get --rate poisson:50 --duration 10s
@@ -158,6 +158,7 @@ Full docs live in [`docs/`](docs/):
 - [CLI & YAML reference](docs/cli-and-yaml.md)
 - [ShareGPT benchmark](docs/sharegpt-benchmark.md) — self-contained end-to-end walkthrough
 - [DeepRAG and mixed lanes](docs/deeprag-mix.md) — prefill-heavy RAG and phase-swinging dataset lanes
+- [TraceLab benchmark](docs/tracelab.md) — replay real coding-agent (Claude/Codex) token + prefix-cache distributions
 - [SGLang benchmark](docs/sglang.md) — native SGLang `/generate` benchmark
 - [Trajectory replay](docs/trajectory-replay.md) — multi-turn prefix-cache parity replay
 
@@ -227,6 +228,8 @@ Helper tooling under [`tools/`](tools/), grouped by purpose:
 
 - `sharegpt/`     — `prepare.py` (fetch ShareGPT V3 → JSONL) + `upload_hf.py`
   (push to the HF Hub with a write token)
+- `tracelab/`     — `prepare.py` (fetch + verify the TraceLab coding-agent
+  trace → JSONL, with optional subsetting)
 - `swe_images/`   — mirror SWE-bench/R2E-Gym container images to ghcr
   (`publish.py`) and list the published refs (`pull.py`)
 - `agent_warmup/` — build the agent-warmup SFT dataset
@@ -248,17 +251,18 @@ benchmaker/          # library code
     sglang.py        #   SGLang native /generate workload-type
     agent.py         #   user-defined Agent workload-type
     trajectory.py    #   multi-turn trajectory replay workload
+    tracelab.py     #   TraceLab coding-agent trace (token-faithful replay)
     eval.py          #   correctness/accuracy evaluation
     hf.py            #   HuggingFace dataset source
     datasets.py      #   generic workload/dataset base classes
     base.py          #   WorkloadType base class
-  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, trajectory-replay, pareval) + registry
+  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, trajectory-replay, pareval, tracelab) + registry
   swebench/
     trajectory.py    #   convert pi logs to replay trajectories
     replay_server.py #   mock-LLM replay server for swebench-replay
     agent.py         #   SWE-bench coding agent + grading + harbor adapters
 examples/            # runnable examples (incl. swebench/ coding-agent config)
-tools/               # out-of-tree tooling: sharegpt/, swe_images/, agent_warmup/
+tools/               # out-of-tree tooling: sharegpt/, tracelab/, swe_images/, agent_warmup/
 tests/               # pytest smoke tests
 docs/                # reference docs
 ```

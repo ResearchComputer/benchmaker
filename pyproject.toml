@@ -15,8 +15,10 @@ dependencies = [
     "click>=8.1",
     "datasets>=4.8.5",
     "huggingface-hub>=1.16.4",
+    "matplotlib>=3.10.9",
     "pyarrow>=24.0.0",
     "pyyaml>=6.0",
+    "seaborn>=0.13.2",
     "swebench>=4.1.0",
     # NOTE: The `benchmaker swebench` recipe also needs `harbor`, the local
     # research package. It has no PyPI release and can't be declared here — PyPI

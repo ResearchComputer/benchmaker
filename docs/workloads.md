@@ -575,6 +575,39 @@ workload:
   seed: 0
 ```
 
+### `TraceLabWorkload`
+
+Replays the [TraceLab](https://github.com/uw-syfi/TraceLab) coding-agent trace
+(real Claude Code / Codex LLM rounds) as token-faithful chat requests. The
+dataset is sanitized — it carries each round's token accounting (`prefix_tokens`
++ `newly_append_tokens` = `input_tokens_total`, `output_tokens`) and session
+structure, but no prompt text — so the workload **synthesizes** prompts sized
+to the recorded tokens. See [TraceLab benchmark](tracelab.md) for the full
+walkthrough.
+
+```python
+from benchmaker import TraceLabWorkload
+
+workload = TraceLabWorkload(
+    ".local/syfi_coding_trace.jsonl",
+    prefix_cache=True,        # byte-exact growing session prefixes
+    match_output_tokens=True, # force the recorded decode length (vLLM/SGLang)
+    max_tokens_cap=1024,
+    provider="claude",
+    max_sessions=500,
+    chars_per_token=4.0,      # char-mode sizing (use tokenizer= for exact)
+)
+```
+
+Pair it with `OpenAIChatWorkloadType(passthrough_meta=True)` so the trace
+metadata is recorded into each sample's `meta` (not sent to the server). The
+recorded `prompt_tokens_hint` (target input) and `prefix_tokens_hint` (target
+cacheable prefix) are promoted into `Sample.extra`, where they sit beside the
+server-reported `prompt_tokens` / `cached_tokens` for direct target-vs-realized
+comparison. Get the dataset with `python tools/tracelab/prepare.py`.
+
+YAML: `type: tracelab` (accepts every constructor kwarg).
+
 ---
 
 ## Custom workload

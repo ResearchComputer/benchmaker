@@ -54,3 +54,13 @@ def test_qos_on_sets_env_kwargs_and_multiplier():
     assert jc.environment.kwargs["on_demand_cpu_weight"] == 10000
     assert jc.environment.kwargs["best_effort_cpu_weight"] == 10
     assert jc.verifier_timeout_multiplier == 2.0
+
+
+def test_no_exclude_task_attr_does_not_raise():
+    """The swebench recipe (and harbor_eval's own CLI) build a namespace with
+    no ``exclude_task`` attribute at all — _build_job_config must read it
+    defensively rather than AttributeError. Regression for the sweep crash."""
+    ns = _ns()
+    del ns.exclude_task
+    jc = _build_job_config(ns)
+    assert jc.datasets[0].exclude_task_names is None

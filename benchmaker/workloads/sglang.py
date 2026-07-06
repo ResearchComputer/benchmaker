@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from benchmaker.env import load_dotenv
 from benchmaker.core.types import Request, Response, Sample
+from benchmaker.workloads._sse import reassemble_sse_lines
 from benchmaker.workloads.base import WorkloadType
 from benchmaker.workloads.llm import _pct
 
@@ -160,36 +161,38 @@ class SGLangGenerateWorkloadType(WorkloadType):
         cached_tokens: Optional[int] = None
         finish_reason: Any = None
 
-        for raw, t in zip(chunks, chunk_times):
-            for line in raw.splitlines():
-                line = line.strip()
-                if line.startswith(b"data:"):
-                    line = line[5:].strip()
-                if not line or line == b"[DONE]":
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                text = obj.get("text")
-                if isinstance(text, str) and text != last_text:
-                    if ttft is None:
-                        ttft = t
-                    arrivals.append(t)
-                    last_text = text
-                mi = obj.get("meta_info")
-                if isinstance(mi, dict):
-                    if mi.get("completion_tokens") is not None:
-                        completion_tokens = int(mi["completion_tokens"])
-                    if mi.get("prompt_tokens") is not None:
-                        prompt_tokens = int(mi["prompt_tokens"])
-                    if mi.get("cached_tokens") is not None:
-                        cached_tokens = int(mi["cached_tokens"])
-                    fr = mi.get("finish_reason")
-                    if fr is not None:
-                        finish_reason = fr
+        # Reassemble across chunk boundaries: aiohttp yields bytes at arbitrary
+        # offsets, so a `meta_info` event can be split across chunks and would be
+        # silently dropped if each chunk were parsed independently (#13).
+        for line, t in reassemble_sse_lines(chunks, chunk_times):
+            line = line.strip()
+            if line.startswith(b"data:"):
+                line = line[5:].strip()
+            if not line or line == b"[DONE]":
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            text = obj.get("text")
+            if isinstance(text, str) and text != last_text:
+                if ttft is None:
+                    ttft = t
+                arrivals.append(t)
+                last_text = text
+            mi = obj.get("meta_info")
+            if isinstance(mi, dict):
+                if mi.get("completion_tokens") is not None:
+                    completion_tokens = int(mi["completion_tokens"])
+                if mi.get("prompt_tokens") is not None:
+                    prompt_tokens = int(mi["prompt_tokens"])
+                if mi.get("cached_tokens") is not None:
+                    cached_tokens = int(mi["cached_tokens"])
+                fr = mi.get("finish_reason")
+                if fr is not None:
+                    finish_reason = fr
 
         out_tokens = completion_tokens if completion_tokens is not None else len(arrivals)
 

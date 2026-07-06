@@ -136,8 +136,9 @@ def test_parse_pi_session_extracts_turns_key_and_tool_status():
     assert t0.tool_calls == [{"id": "call_a", "name": "bash", "arguments": {"command": "ls"}}]
     assert t0.usage == {"prompt_tokens": 1513, "completion_tokens": 124,
                         "total_tokens": 1637, "cache_read": 0, "cache_write": 5, "cost": 0.0}
-    # tool result status comes from the toolResult message's content
-    assert t0.tool_results == [{"name": "bash", "status": 0}]
+    # tool result status comes from the toolResult message's content; out_chars
+    # is the length of that content ("returncode: 0\nok" == 16 chars)
+    assert t0.tool_results == [{"name": "bash", "status": 0, "out_chars": 16}]
 
     assert traj.turns[1].finish_reason == "stop" and traj.turns[1].content == "done"
 
@@ -403,7 +404,8 @@ def test_parse_captures_tool_results_aligned_by_id():
                "content": [{"type": "text", "text": "done"}]}}),
     ])
     traj = parse_pi_conversation(log)
-    assert traj.turns[0].tool_results == [{"name": "bash", "status": 1}]
+    # out_chars is the length of the result content ("returncode: 1\nFAILED\n" == 21)
+    assert traj.turns[0].tool_results == [{"name": "bash", "status": 1, "out_chars": 21}]
     assert traj.turns[-1].tool_results == []
 
 

@@ -39,7 +39,7 @@ class RecordedTurn:
     tool_calls: list[dict]          # [{"id","name","arguments": dict}]
     finish_reason: str              # "tool_calls" | "stop"
     usage: dict                     # OpenAI-named: prompt_tokens/completion_tokens/...
-    tool_results: list[dict] = field(default_factory=list)  # [{"name","status"}] per tool_call
+    tool_results: list[dict] = field(default_factory=list)  # [{"name","status","out_chars"}] per tool_call
 
     def to_dict(self) -> dict:
         return {
@@ -251,7 +251,7 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
     first_user_text: Optional[str] = None
     model: Optional[str] = None
     turns: list[RecordedTurn] = []
-    tool_status: dict[str, tuple[str, Optional[int]]] = {}
+    tool_status: dict[str, tuple[str, Optional[int], int]] = {}
     for raw in log_text.splitlines():
         raw = raw.strip()
         if not raw:
@@ -272,7 +272,7 @@ def parse_pi_conversation(log_text: str) -> Trajectory:
                 tname = ev.get("toolName") or ""
                 result = ev.get("result")
                 text = _message_text(result.get("content")) if isinstance(result, dict) else ""
-                tool_status[tcid] = (tname, derive_tool_status(tname, text))
+                tool_status[tcid] = (tname, derive_tool_status(tname, text), len(text))
         if ev.get("type") == "turn_end":
             msg = ev.get("message")
             if isinstance(msg, dict) and msg.get("role") == "assistant":
@@ -300,7 +300,7 @@ def parse_pi_session(session_text: str) -> Trajectory:
     first_user_text: Optional[str] = None
     model: Optional[str] = None
     turns: list[RecordedTurn] = []
-    tool_status: dict[str, tuple[str, Optional[int]]] = {}
+    tool_status: dict[str, tuple[str, Optional[int], int]] = {}
     for raw in session_text.splitlines():
         raw = raw.strip()
         if not raw:
@@ -323,7 +323,7 @@ def parse_pi_session(session_text: str) -> Trajectory:
             if isinstance(tcid, str) and tcid:
                 tname = msg.get("toolName") or ""
                 text = _message_text(msg.get("content"))
-                tool_status[tcid] = (tname, derive_tool_status(tname, text))
+                tool_status[tcid] = (tname, derive_tool_status(tname, text), len(text))
         elif role == "assistant":
             if model is None and isinstance(msg.get("model"), str):
                 model = msg["model"]
@@ -340,11 +340,12 @@ def _finalize_trajectory(first_user_text: Optional[str], model: Optional[str],
     # (Derived from result *content*, not the event's isError, which is unreliable
     # in pi-host route_tools=all — always false. See the replay-content-validation spec.)
     for t in turns:
-        t.tool_results = [
-            {"name": tool_status.get(tc.get("id"), (tc.get("name") or "", None))[0],
-             "status": tool_status.get(tc.get("id"), (tc.get("name") or "", None))[1]}
-            for tc in t.tool_calls
-        ]
+        results = []
+        for tc in t.tool_calls:
+            name, status, out_chars = tool_status.get(
+                tc.get("id"), (tc.get("name") or "", None, None))
+            results.append({"name": name, "status": status, "out_chars": out_chars})
+        t.tool_results = results
     text = first_user_text or ""
     return Trajectory(
         key=_key_from_text(text), instance_id=_instance_id_from_text(text),

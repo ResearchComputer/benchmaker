@@ -360,6 +360,105 @@ def _completion_fields(trial_dir: Path, traj: Any) -> dict[str, Any]:
     return _completion_fields_from_status(_read_exit_status(trial_dir), traj)
 
 
+def _phase_secs(section: Any) -> Optional[float]:
+    """finished_at - started_at (seconds) for a {started_at, finished_at} dict."""
+    if not isinstance(section, dict):
+        return None
+    s, f = section.get("started_at"), section.get("finished_at")
+    if not s or not f:
+        return None
+    try:
+        ds = _dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        df = _dt.datetime.fromisoformat(str(f).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (df - ds).total_seconds()
+
+
+def _runtime_fields_from(result_data: Any, spans: list[dict],
+                         exec_timeout_s: Any) -> dict[str, Any]:
+    """Per-trial runtime block the parsed trajectory itself can't carry.
+
+    Closes the three gaps a pure trajectory record has: (1) wall-clock + phase
+    durations (from ``result.json``), (2) per-command exec timing — ``rc`` and
+    ``duration_s`` for every ``sandbox_exec`` span (from ``timeline-spans.jsonl``),
+    and (3) the per-command exec-timeout cap ``exec_timeout_s`` (from
+    ``config.json``). Storing the raw spans + cap lets a consumer recompute any
+    duration statistic or apply the exact ``rc<0 & d>=0.9*T`` timeout gate the
+    sweep summary uses. Pure (takes already-loaded data) so the legacy and
+    cleaned collection paths share it. Defensive: missing data degrades a field,
+    never raises.
+    """
+    out: dict[str, Any] = {"exec_timeout_s": exec_timeout_s}
+    if isinstance(result_data, dict):
+        out["wall_s"] = _phase_secs(result_data.get("agent_execution"))
+        out["phases"] = {
+            "environment_setup_s": _phase_secs(result_data.get("environment_setup")),
+            "agent_setup_s": _phase_secs(result_data.get("agent_setup")),
+            "agent_execution_s": _phase_secs(result_data.get("agent_execution")),
+            "verifier_s": _phase_secs(result_data.get("verifier")),
+        }
+    compact = [{"seq": s.get("seq"), "rc": s.get("rc"), "duration_s": s.get("duration_s")}
+               for s in spans if isinstance(s, dict) and s.get("name") == "sandbox_exec"]
+    out["exec_spans"] = compact
+    if compact:
+        durs = sorted(float(s["duration_s"] or 0.0) for s in compact)
+        n = len(durs)
+        out["exec_stats"] = {
+            "n_exec": n,
+            "n_timeout": sum(1 for s in compact if int(s["rc"] or 0) < 0),  # rc<0 == killed at cap
+            "dur_mean": sum(durs) / n,
+            "dur_p95": durs[int(0.95 * (n - 1))],
+            "dur_max": durs[-1],
+        }
+    return out
+
+
+def _read_result_json(trial_dir: Path) -> Any:
+    try:
+        return json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _read_spans(trial_dir: Path) -> list[dict]:
+    sp = trial_dir / "agent" / "timeline-spans.jsonl"
+    if not sp.exists():
+        return []
+    spans: list[dict] = []
+    try:
+        for line in sp.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(o, dict):
+                spans.append(o)
+    except Exception:
+        return []
+    return spans
+
+
+def _exec_timeout_from_config_data(cfg: Any) -> Any:
+    agent = cfg.get("agent") if isinstance(cfg, dict) else None
+    kwargs = agent.get("kwargs") if isinstance(agent, dict) else None
+    return kwargs.get("exec_timeout_s") if isinstance(kwargs, dict) else None
+
+
+def _runtime_fields(trial_dir: Path) -> dict[str, Any]:
+    """Legacy-layout runtime block: read result.json, timeline-spans, config.json."""
+    cfg: Any = None
+    try:
+        cfg = json.loads((trial_dir / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        cfg = None
+    return _runtime_fields_from(_read_result_json(trial_dir), _read_spans(trial_dir),
+                                _exec_timeout_from_config_data(cfg))
+
+
 def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
     """Fuse one trial's parsed trajectory with its grade, or None to skip."""
     log_path, mode = _trial_log(trial_dir)
@@ -394,6 +493,7 @@ def _collect_trial(trial_dir: Path) -> Optional[dict[str, Any]]:
     rec["passed"] = reward is not None and reward >= 1.0
     rec.update(_read_report(trial_dir))
     rec.update(_completion_fields(trial_dir, traj))
+    rec.update(_runtime_fields(trial_dir))
     return rec
 
 
@@ -424,6 +524,9 @@ def _collect_cleaned_trial(trial: Any) -> Optional[dict[str, Any]]:
     rec.update(_report_fields(trial.report))
     rec.update(_completion_fields_from_status(
         _exit_status_from_result(trial.result), traj))
+    spans = list(getattr(trial, "timeline_spans", None) or [])
+    rec.update(_runtime_fields_from(
+        trial.result, spans, _exec_timeout_from_config_data(trial.config)))
     return rec
 
 

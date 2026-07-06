@@ -22,6 +22,7 @@ from benchmaker.workloads.hf import HFDatasetWorkload
 from benchmaker.workloads.rag import DeepRAGWorkload
 from benchmaker.workloads.sglang import SGLangGenerateWorkloadType
 from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
+from benchmaker.workloads.tracelab import TraceLabWorkload
 from benchmaker.workloads.agent import (
     Agent,
     AgentContext,
@@ -93,6 +94,7 @@ __all__ = [
     "DeepRAGWorkload",
     "SGLangGenerateWorkloadType",
     "TrajectoryReplayWorkload",
+    "TraceLabWorkload",
     # agent workload (pluggable user-defined agents)
     "Agent",
     "AgentContext",
