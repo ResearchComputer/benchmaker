@@ -54,6 +54,14 @@ class LlmRecipe(Recipe):
             click.option("--top-p", "top_p", type=float, default=None),
             click.option("--top-k", "top_k", type=int, default=None),
             click.option("--stop", multiple=True, help="Stop string (repeatable)."),
+            click.option("--ttft-token", "ttft_token",
+                         type=click.Choice(["any", "content"]), default="any",
+                         help="Which token the headline ttft_s is measured to: "
+                              "'any' (default) = first token the server produces "
+                              "(reasoning or content), the engine-cost signal; "
+                              "'content' = first visible (non-reasoning) token, "
+                              "the latency a user perceives. The first-content "
+                              "time is always surfaced as content_ttft_s too."),
             click.option("--extra", "extras", multiple=True,
                          help="Extra sampling param 'key=value' (value parsed as JSON, "
                               "else string). Repeatable."),
@@ -62,7 +70,7 @@ class LlmRecipe(Recipe):
     def build(self, shared: SharedOpts, *, url, model, api_key, header, prompts,
               prompts_jsonl, prompt_field, full_jsonl_row, shuffle, seed,
               max_tokens, min_tokens, ignore_eos, temperature, top_p, top_k,
-              stop, extras) -> BuildResult:
+              stop, ttft_token, extras) -> BuildResult:
         from benchmaker.config import build_workload
         from benchmaker.workloads.llm import OpenAIChatWorkloadType
 
@@ -87,6 +95,7 @@ class LlmRecipe(Recipe):
             wt_kwargs["top_k"] = top_k
         if stop:
             wt_kwargs["stop"] = list(stop)
+        wt_kwargs["ttft_token"] = ttft_token
         for item in extras:
             if "=" not in item:
                 raise click.BadParameter(f"--extra must be 'key=value', got {item!r}")

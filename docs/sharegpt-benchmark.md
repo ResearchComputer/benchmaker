@@ -194,26 +194,35 @@ For an OpenAI-streaming endpoint that streams `content` token-by-token, the
 report also includes **`ttft_s`** (time to first token) and **`itl_ms`**
 (inter-token latency p50/p99). See below for when those go missing.
 
-## 7. Caveat: reasoning models and TTFT / ITL
+## 7. Reasoning models and TTFT / ITL
 
 `OpenAIChatWorkloadType` measures TTFT and inter-token latency from the
-streamed `choices[].delta.content` field. **Reasoning models** (GLM-4.x,
-DeepSeek-R1, and similar) stream their chain-of-thought under a separate
-`delta.reasoning_content` field and leave `delta.content` `null` until the
-final answer. The consequences for a benchmark:
+streamed `choices[].delta` field. **Reasoning models** (GLM-4.x, DeepSeek-R1,
+Qwen3-thinking, gpt-5 reasoning, …) stream their chain-of-thought under a
+separate `delta.reasoning_content` field and leave `delta.content` `null` until
+the final answer. Those reasoning tokens are real engine output, so the
+workload-type counts them the same as content tokens (#14):
 
-- `ttft_s` and `itl_ms` are **not** captured (no `content` deltas were seen),
-  so they are omitted from the report.
-- `tokens_out` still comes from the server `usage` block, and `tokens_per_s`
-  falls back to `tokens_out / total_latency` instead of excluding TTFT.
-- If `max_tokens` is small, the model may spend the entire budget *thinking* and
-  emit no answer at all (its `usage` shows `reasoning_tokens == completion_tokens`).
+- `ttft_s` — by default (`--ttft-token any`, the default) measured to the
+  *first token of any kind* (reasoning or content), the engine-cost signal a
+  serving benchmark wants. Pass `--ttft-token content` to measure time to the
+  *first visible* token instead (the latency a user perceives).
+- `content_ttft_s` — the first-visible-token time, surfaced separately whenever
+  it differs from `ttft_s` (i.e. reasoning preceded content), so both signals
+  are available in one run regardless of the knob.
+- `itl_ms_*` — inter-token latency across the *whole* generation (reasoning
+  and content decoded at the same per-token cost), reflecting true decode
+  cadence instead of conflating the reasoning phase.
+- `tokens_out` — from the server `usage` block when present; otherwise falls
+  back to the count of streamed tokens, which now includes reasoning tokens.
+- `reasoning_tokens` / `content_tokens` — surfaced from
+  `usage.completion_tokens_details` when the server reports the breakdown.
 
-So latency / throughput / token-count metrics remain valid for reasoning models,
-but **TTFT/ITL do not**. If you need first-token latency on a reasoning model,
-either disable thinking (model-specific, e.g. a `chat_template_kwargs` /
-`reasoning` flag passed through as an extra sampling param) or extend the
-workload-type to also time `reasoning_content` deltas.
+If `max_tokens` is small, a reasoning model may spend the entire budget
+*thinking* and emit no answer at all (its `usage` shows
+`reasoning_tokens == completion_tokens`); such a sample still carries
+latency/throughput metrics but is worth flagging separately when interpreting
+results.
 
 ## 8. Tips
 

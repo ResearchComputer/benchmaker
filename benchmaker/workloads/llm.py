@@ -9,11 +9,28 @@ Item interpretation:
                         plus any extra OpenAI-compat sampling params.
 
 Captured metrics (on top of base latency/throughput):
-    ttft_s              first-token latency
-    itl_ms_mean/p50/p99 inter-token latency (ms)
+    ttft_s              first-token latency (see `ttft_token`)
+    content_ttft_s      time to first visible (content) token, when reasoning
+                        preceded it (i.e. when it differs from ttft_s)
+    itl_ms_mean/p50/p99 inter-token latency across the whole generation (ms),
+                        counting reasoning tokens the same as content tokens
     tokens_out          completion tokens (from usage, else counted)
+    reasoning_tokens    from usage.completion_tokens_details, when present
+    content_tokens      completion_tokens - reasoning_tokens, when both known
     prompt_tokens       from usage block when available
     tokens_per_s        completion_tokens / generation_time
+
+`ttft_token` selects which token the headline `ttft_s` is measured to:
+  * `"any"`     (default) — first token the server produces, reasoning *or*
+                  content. The engine-cost signal a serving benchmark wants;
+                  isolates prefill→decode from the model's reasoning policy.
+  * `"content"` — first *visible* (non-reasoning) token, the latency a user
+                  perceives before an answer appears.
+The first-content time is always surfaced separately as `content_ttft_s`
+when it is a distinct instant, so both signals are available regardless of
+the knob. Inter-token latency always spans the whole stream (reasoning and
+content decoded at the same per-token cost), so it reflects true decode
+cadence for thinking models too (#14).
 """
 
 from __future__ import annotations
@@ -77,13 +94,27 @@ class OpenAIChatWorkloadType(WorkloadType):
         timeout_s: Optional[float] = 600.0,
         name: str = "openai-chat",
         passthrough_meta: bool = False,
+        ttft_token: str = "any",
         **sampling: Any,
     ):
         """Any extra keyword argument (e.g. ``min_tokens``, ``ignore_eos``,
         ``top_p``, ``stop``, ``repetition_penalty``, ``guided_json``, ...) is
         forwarded into the request body. ``extra_body`` is still accepted as
         an explicit dict; ``**sampling`` overrides it on key conflict.
+
+        ``ttft_token`` (``"any"`` | ``"content"``, default ``"any"``) selects
+        which token the headline ``ttft_s`` is measured to — the first token
+        of any kind, or the first visible content token. See the module
+        docstring for the reasoning-model rationale.
         """
+        if ttft_token not in ("any", "content"):
+            raise ValueError(
+                f"ttft_token must be 'any' or 'content', got {ttft_token!r}. "
+                "'any' (default) measures time to the first token the server "
+                "produces (reasoning or content); 'content' measures time to "
+                "the first visible (non-reasoning) token."
+            )
+        self._ttft_token = ttft_token
         self.name = name
         self._url = url
         self._model = model
@@ -231,9 +262,20 @@ class OpenAIChatWorkloadType(WorkloadType):
 
         chunks = response.stream_chunks or []
         chunk_times = response.stream_chunk_times or []
-        ttft: Optional[float] = None
+        # First token of *any* kind (reasoning or content): the engine-cost
+        # signal a serving benchmark wants — when the server began producing
+        # output, isolating prefill→decode from the model's reasoning policy.
+        first_token: Optional[float] = None
+        # First *visible* (content) token: the latency a user perceives before
+        # an answer appears. Tracked separately so it's surfaced as
+        # `content_ttft_s` even when `ttft_token="any"` (#14).
+        first_content_token: Optional[float] = None
+        # Every token the stream produced, reasoning and content alike, so
+        # inter-token latency reflects true decode cadence across the whole
+        # generation instead of conflating the reasoning phase.
         token_arrival_times: list[float] = []
         usage_completion_tokens: Optional[int] = None
+        reasoning_tokens: Optional[int] = None
         prompt_tokens: Optional[int] = None
         cached_tokens: Optional[int] = None
         finish_reason: Optional[str] = None
@@ -268,11 +310,30 @@ class OpenAIChatWorkloadType(WorkloadType):
                     cached_tokens = int(details["cached_tokens"])
                 elif u.get("cached_tokens") is not None:
                     cached_tokens = int(u["cached_tokens"])
+                # Thinking models report generated reasoning tokens separately
+                # from visible content; surfacing the breakdown keeps tokens_out
+                # honest and exposes the reasoning share (#14).
+                details = u.get("completion_tokens_details")
+                if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+                    reasoning_tokens = int(details["reasoning_tokens"])
             for ch in obj.get("choices") or []:
                 delta = ch.get("delta") or {}
-                if delta.get("content"):
-                    if ttft is None:
-                        ttft = t
+                # Count reasoning tokens the same as content tokens: a thinking
+                # model streams its chain-of-thought in `reasoning_content`
+                # before any `content`, and those bytes are real engine output.
+                # Without this, ttft/itl/tokens are wrong for the whole class of
+                # reasoning models (#14).
+                content_piece = delta.get("content")
+                reasoning_piece = delta.get("reasoning_content")
+                if content_piece:
+                    if first_token is None:
+                        first_token = t
+                    if first_content_token is None:
+                        first_content_token = t
+                    token_arrival_times.append(t)
+                if reasoning_piece:
+                    if first_token is None:
+                        first_token = t
                     token_arrival_times.append(t)
                 if ch.get("finish_reason"):
                     finish_reason = ch["finish_reason"]
@@ -283,14 +344,24 @@ class OpenAIChatWorkloadType(WorkloadType):
         if response.ok and not usage_seen:
             _warn_missing_usage_once(request)
 
+        # When the endpoint omits `usage`, fall back to the count of streamed
+        # tokens — which now includes reasoning tokens, so a thinking model is
+        # no longer undercounted by its entire chain-of-thought (#14).
         completion_tokens = (
             usage_completion_tokens
             if usage_completion_tokens is not None
             else len(token_arrival_times)
         )
 
+        # `ttft_token` selects which token the headline `ttft_s` is measured
+        # to. The first-content time is always surfaced separately as
+        # `content_ttft_s` when it is a distinct instant, so a serving run
+        # (ttft = first-any token) also captures perceived latency.
+        ttft = first_content_token if self._ttft_token == "content" else first_token
         if ttft is not None:
             sample.extra["ttft_s"] = ttft
+        if first_content_token is not None and first_content_token != ttft:
+            sample.extra["content_ttft_s"] = first_content_token
 
         if len(token_arrival_times) >= 2:
             itl = [
@@ -302,6 +373,14 @@ class OpenAIChatWorkloadType(WorkloadType):
             sample.extra["itl_ms_p99"] = _pct(itl, 99)
 
         sample.extra["tokens_out"] = float(completion_tokens)
+        # Surface the reasoning/content breakdown from `usage` when the server
+        # reports it, so a run can see how much of the generation was thinking
+        # vs. the visible answer (#14).
+        if reasoning_tokens is not None:
+            sample.extra["reasoning_tokens"] = float(reasoning_tokens)
+            if completion_tokens >= reasoning_tokens:
+                sample.extra["content_tokens"] = (
+                    float(completion_tokens) - float(reasoning_tokens))
         if prompt_tokens is not None:
             sample.extra["prompt_tokens"] = float(prompt_tokens)
         if cached_tokens is not None:
