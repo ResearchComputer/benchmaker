@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Fixed `OpenAIChatWorkloadType` silently ignoring `delta.reasoning_content`
+  for thinking models (GLM-4.x, DeepSeek-R1, Qwen3-thinking, gpt-5 reasoning,
+  …), which made `ttft_s`, `itl_ms_*`, and (when `usage` was absent)
+  `tokens_out` wrong by the entire reasoning phase. Reasoning tokens are now
+  counted the same as content tokens for TTFT/ITL, the
+  `usage.completion_tokens_details.reasoning_tokens` breakdown is surfaced
+  (`reasoning_tokens` / `content_tokens`), and a new `ttft_token`
+  (`"any"` | `"content"`, default `"any"`) knob selects whether the headline
+  `ttft_s` measures the first token of any kind or the first visible content
+  token. The first-content time is always available separately as
+  `content_ttft_s` (#14).
+
 ## 0.1.4 — 2026-06-24
 
 - Fixed silent loss of streamed `usage` (real `prompt_tokens`, `cached_tokens`)

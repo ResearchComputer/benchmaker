@@ -118,7 +118,7 @@ def test_llm_full_jsonl_row_build_enables_passthrough(tmp_path):
         header=(), prompts=(), prompts_jsonl=str(p), prompt_field="prompt",
         full_jsonl_row=True, shuffle=False, seed=0, max_tokens=128,
         min_tokens=None, ignore_eos=None, temperature=0.0, top_p=None,
-        top_k=None, stop=(), extras=())
+        top_k=None, stop=(), ttft_token="any", extras=())
     assert built.workload_type._passthrough_meta is True
     assert built.workload._field is None  # JsonlWorkload yields whole rows
 
@@ -131,7 +131,7 @@ def test_llm_empty_prompt_field_implies_full_row(tmp_path):
         header=(), prompts=(), prompts_jsonl=str(p), prompt_field="",
         full_jsonl_row=False, shuffle=False, seed=0, max_tokens=128,
         min_tokens=None, ignore_eos=None, temperature=0.0, top_p=None,
-        top_k=None, stop=(), extras=())
+        top_k=None, stop=(), ttft_token="any", extras=())
     assert built.workload_type._passthrough_meta is True
     assert built.workload._field is None
 
@@ -144,7 +144,7 @@ def test_llm_normal_jsonl_does_not_enable_passthrough(tmp_path):
         header=(), prompts=(), prompts_jsonl=str(p), prompt_field="prompt",
         full_jsonl_row=False, shuffle=False, seed=0, max_tokens=128,
         min_tokens=None, ignore_eos=None, temperature=0.0, top_p=None,
-        top_k=None, stop=(), extras=())
+        top_k=None, stop=(), ttft_token="any", extras=())
     assert built.workload_type._passthrough_meta is False
     assert built.workload._field == "prompt"
 
@@ -158,4 +158,4 @@ def test_llm_full_row_with_static_prompt_errors():
             api_key=None, header=(), prompts=("hi",), prompts_jsonl=None,
             prompt_field="prompt", full_jsonl_row=True, shuffle=False, seed=0,
             max_tokens=128, min_tokens=None, ignore_eos=None, temperature=0.0,
-            top_p=None, top_k=None, stop=(), extras=())
+            top_p=None, top_k=None, stop=(), ttft_token="any", extras=())

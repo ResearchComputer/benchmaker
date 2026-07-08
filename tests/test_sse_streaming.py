@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 from benchmaker.core.types import Request, Response
 from benchmaker.workloads.llm import OpenAIChatWorkloadType
 from benchmaker.workloads.sglang import SGLangGenerateWorkloadType
@@ -127,3 +129,125 @@ async def test_sglang_meta_info_survives_split_across_chunks():
     assert sample.extra["prompt_tokens"] == 50.0
     assert sample.extra["cached_tokens"] == 40.0
     assert sample.extra["tokens_out"] == 2.0
+
+
+# --------------------------------------------------------------------------- #
+# Reasoning models: delta.reasoning_content must be counted (#14)              #
+# --------------------------------------------------------------------------- #
+
+def _reasoning_events(*, with_usage=True):
+    """A thinking-model stream: reasoning_content deltas, then content deltas.
+
+    Returns (raw, chunks, times) with one SSE event per chunk and explicit
+    per-token arrival times (seconds since request start). Reasoning tokens
+    arrive first (0.10, 0.11), then content (0.50, 0.51).
+    """
+    evs = [
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {"reasoning_content": "Hmm"}}]}), 0.10),
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {"reasoning_content": " let me think"}}]}), 0.11),
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {"content": "The answer"}}]}), 0.50),
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {"content": " is 42"}}]}), 0.51),
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {}, "finish_reason": "stop"}]}), 0.52),
+    ]
+    if with_usage:
+        evs.append(('data: ' + json.dumps({
+            "choices": [], "usage": {
+                "prompt_tokens": 10, "completion_tokens": 4,
+                "completion_tokens_details": {"reasoning_tokens": 2}}}), 0.53))
+    evs.append(('data: [DONE]', 0.54))
+    raw = b"".join((e + "\n\n").encode() for e, _ in evs)
+    chunks = [(e + "\n\n").encode() for e, _ in evs]
+    times = [t for _, t in evs]
+    return raw, chunks, times
+
+
+async def test_reasoning_tokens_counted_in_ttft_and_tokens():
+    """A thinking model streams reasoning_content before content; the parser
+    must count those tokens so ttft_s is the true first-byte latency and
+    tokens_out is not undercounted (#14)."""
+    raw, chunks, times = _reasoning_events()
+    resp = Response(status=200, headers={}, body=raw, elapsed_s=0.6, ok=True,
+                    stream_chunks=chunks, stream_chunk_times=times)
+    wt = OpenAIChatWorkloadType(url="http://x", model="m")
+    req = await wt.make_request("hi")
+    sample = await wt.make_sample("hi", req, resp, 0.0)
+    # TTFT is the first *any* token (the reasoning delta at 0.10s), not the
+    # first content delta at 0.50s.
+    assert sample.extra["ttft_s"] == 0.10
+    # The first visible (content) token is surfaced separately.
+    assert sample.extra["content_ttft_s"] == 0.50
+    # tokens_out comes from usage.completion_tokens (4), not the old
+    # content-only count of 2.
+    assert sample.extra["tokens_out"] == 4.0
+    assert sample.extra["reasoning_tokens"] == 2.0
+    assert sample.extra["content_tokens"] == 2.0
+    # ITL spans the whole generation (reasoning + content arrivals).
+    assert "itl_ms_mean" in sample.extra
+    assert sample.extra["itl_ms_mean"] > 0
+
+
+async def test_ttft_token_content_uses_first_visible_token():
+    """With ttft_token='content', the headline ttft_s is the first visible
+    token; content_ttft_s is not duplicated onto it."""
+    raw, chunks, times = _reasoning_events()
+    resp = Response(status=200, headers={}, body=raw, elapsed_s=0.6, ok=True,
+                    stream_chunks=chunks, stream_chunk_times=times)
+    wt = OpenAIChatWorkloadType(url="http://x", model="m", ttft_token="content")
+    req = await wt.make_request("hi")
+    sample = await wt.make_sample("hi", req, resp, 0.0)
+    assert sample.extra["ttft_s"] == 0.50
+    assert "content_ttft_s" not in sample.extra
+    assert sample.extra["reasoning_tokens"] == 2.0
+
+
+async def test_reasoning_tokens_counted_when_usage_omitted():
+    """Without a usage block, tokens_out falls back to the count of streamed
+    tokens — which must include reasoning tokens, not just content (#14)."""
+    raw, chunks, times = _reasoning_events(with_usage=False)
+    resp = Response(status=200, headers={}, body=raw, elapsed_s=0.6, ok=True,
+                    stream_chunks=chunks, stream_chunk_times=times)
+    wt = OpenAIChatWorkloadType(url="http://x", model="m")
+    req = await wt.make_request("hi")
+    sample = await wt.make_sample("hi", req, resp, 0.0)
+    # 2 reasoning + 2 content = 4 streamed tokens (was 2 before the fix).
+    assert sample.extra["tokens_out"] == 4.0
+    assert sample.extra["ttft_s"] == 0.10
+    assert "reasoning_tokens" not in sample.extra
+
+
+async def test_non_reasoning_response_unchanged_no_content_ttft():
+    """A plain (non-reasoning) stream has no reasoning_content, so ttft_s is
+    the first content token and content_ttft_s is not redundantly emitted."""
+    evs = [
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {"content": "w0"}}]}), 0.40),
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {"content": "w1"}}]}), 0.41),
+        ('data: ' + json.dumps({"choices": [
+            {"index": 0, "delta": {}, "finish_reason": "stop"}]}), 0.42),
+        ('data: ' + json.dumps({"choices": [], "usage": {
+            "prompt_tokens": 10, "completion_tokens": 2}}), 0.43),
+        ('data: [DONE]', 0.44),
+    ]
+    raw = b"".join((e + "\n\n").encode() for e, _ in evs)
+    chunks = [(e + "\n\n").encode() for e, _ in evs]
+    times = [t for _, t in evs]
+    resp = Response(status=200, headers={}, body=raw, elapsed_s=0.6, ok=True,
+                    stream_chunks=chunks, stream_chunk_times=times)
+    wt = OpenAIChatWorkloadType(url="http://x", model="m")
+    req = await wt.make_request("hi")
+    sample = await wt.make_sample("hi", req, resp, 0.0)
+    assert sample.extra["ttft_s"] == 0.40
+    assert "content_ttft_s" not in sample.extra
+    assert "reasoning_tokens" not in sample.extra
+    assert sample.extra["tokens_out"] == 2.0
+
+
+def test_ttft_token_invalid_raises():
+    with pytest.raises(ValueError):
+        OpenAIChatWorkloadType(url="http://x", model="m", ttft_token="bogus")

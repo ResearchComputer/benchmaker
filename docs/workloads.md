@@ -107,11 +107,25 @@ StaticWorkload(items=[
 
 **Extra metrics captured per request** (in `Sample.extra`, then aggregated):
 
-- `ttft_s`        — time to first token
-- `itl_ms_mean / itl_ms_p50 / itl_ms_p99` — inter-token latency
+- `ttft_s`        — time to first token (see `ttft_token`)
+- `content_ttft_s` — time to first *visible* (content) token, surfaced only
+                     when reasoning preceded it (i.e. it differs from `ttft_s`)
+- `itl_ms_mean / itl_ms_p50 / itl_ms_p99` — inter-token latency across the
+                     whole generation, counting reasoning tokens the same as
+                     content tokens
 - `tokens_out`    — completion tokens (from `usage` if the server includes it, else counted from chunks)
+- `reasoning_tokens` — from `usage.completion_tokens_details` when present
+- `content_tokens`   — `completion_tokens - reasoning_tokens` when both known
 - `prompt_tokens` — when present in `usage`
 - `tokens_per_s`  — `tokens_out / (latency - ttft)`
+
+`ttft_token` (`"any"` | `"content"`, default `"any"`) selects which token the
+headline `ttft_s` is measured to: the first token of any kind (reasoning *or*
+content — the engine-cost signal a serving benchmark wants) or the first
+visible content token (the latency a user perceives). For thinking models
+(GLM-4.x, DeepSeek-R1, …) the reasoning chain streams in `reasoning_content`
+before `content`; counting those tokens keeps `ttft_s`, `itl_ms_*`, and
+`tokens_out` honest instead of silently ignoring the whole reasoning phase.
 
 A 200-status response with zero tokens is marked `ok=False` (error: `"no
 tokens received"`).
