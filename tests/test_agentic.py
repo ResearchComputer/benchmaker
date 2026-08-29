@@ -1,10 +1,10 @@
-"""Trajectory replay: message sanitize, parse, per-turn prefix expansion."""
+"""Agentic workload: message sanitize, parse, per-turn prefix expansion."""
 from __future__ import annotations
 
 import json
 
-from benchmaker.workloads.trajectory import (
-    TrajectoryReplayWorkload,
+from benchmaker.workloads.agentic import (
+    AgenticWorkload,
     expand_trajectory,
     parse_messages,
     sanitize_message,
@@ -80,7 +80,7 @@ async def test_workload_over_jsonl_yields_then_stops(tmp_path):
                                  {"role": "assistant", "content": "a2"}])},
     ]
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    wl = TrajectoryReplayWorkload(path=str(p), max_tokens=16)
+    wl = AgenticWorkload(path=str(p), max_tokens=16)
     got = []
     try:
         while True:
@@ -102,7 +102,7 @@ async def test_workload_caps(tmp_path):
                                      {"role": "assistant", "content": "a2"}])}
             for n in range(5)]
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    wl = TrajectoryReplayWorkload(path=str(p), max_trajectories=2,
+    wl = AgenticWorkload(path=str(p), max_trajectories=2,
                                   max_turns_per_trajectory=1)
     got = []
     try:
@@ -134,7 +134,7 @@ async def test_max_trajectories_skips_empty_trajectories(tmp_path):
                                  {"role": "assistant", "content": "a"}])},
     ]
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    wl = TrajectoryReplayWorkload(path=str(p), max_trajectories=2)
+    wl = AgenticWorkload(path=str(p), max_trajectories=2)
     got = []
     try:
         while True:
@@ -152,7 +152,7 @@ async def test_aclose_after_partial_iteration(tmp_path):
                                 {"role": "assistant", "content": "a1"},
                                 {"role": "user", "content": "u2"},
                                 {"role": "assistant", "content": "a2"}])}) + "\n")
-    wl = TrajectoryReplayWorkload(path=str(p))
+    wl = AgenticWorkload(path=str(p))
     first = await wl.next_item()
     assert first["meta"]["turn_index"] == 0
     await wl.aclose()                 # must not raise; releases the generator/file
@@ -160,7 +160,7 @@ async def test_aclose_after_partial_iteration(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# trajectory-replay recipe (CLI subcommand) tests.
+# agentic recipe (CLI subcommand) tests.
 # --------------------------------------------------------------------------
 
 import asyncio
@@ -183,30 +183,30 @@ def _shared():
                       out_dir=None, run_id=None, labels=(), notes="")
 
 
-def test_trajectory_recipe_registered():
-    assert "trajectory-replay" in {r.name for r in all_recipes()}
-    assert "trajectory-replay" in main.commands
+def test_agentic_recipe_registered():
+    assert "agentic" in {r.name for r in all_recipes()}
+    assert "agentic" in main.commands
 
 
-def test_trajectory_build_passthrough_and_workload(tmp_path):
+def test_agentic_build_passthrough_and_workload(tmp_path):
     p = tmp_path / "t.jsonl"
     p.write_text(json.dumps({
         "instance_id": "i1", "model": "m",
         "messages": json.dumps([{"role": "user", "content": "u"},
                                 {"role": "assistant", "content": "a"}])}) + "\n")
-    built = get("trajectory-replay").build(
+    built = get("agentic").build(
         _shared(), url="http://x/v1/chat/completions", model="target",
         api_key=None, header=(), dataset=None, prompts_jsonl=str(p),
         split="tool", preset=None, tokenizer=None, messages_field="messages",
         id_field="instance_id", model_field="model", max_tokens=256,
         max_turns_per_trajectory=None, max_trajectories=None)
-    from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
+    from benchmaker.workloads.agentic import AgenticWorkload
     assert built.workload_type._passthrough_meta is True
-    assert isinstance(built.workload, TrajectoryReplayWorkload)
+    assert isinstance(built.workload, AgenticWorkload)
 
 
 def test_swe_smith_preset_sets_dataset_defaults():
-    built = get("trajectory-replay").build(
+    built = get("agentic").build(
         _shared(), url="http://x/v1/chat/completions", model="target",
         api_key=None, header=(), dataset=None, prompts_jsonl=None,
         split="tool", preset="swe-smith", tokenizer=None,
@@ -248,7 +248,7 @@ def _chat_sse_server():
     return f"http://127.0.0.1:{port}", loop, t
 
 
-def test_trajectory_replay_e2e_records_metadata(tmp_path):
+def test_agentic_e2e_records_metadata(tmp_path):
     url, loop, t = _chat_sse_server()
     try:
         traj = tmp_path / "t.jsonl"
@@ -265,7 +265,7 @@ def test_trajectory_replay_e2e_records_metadata(tmp_path):
         traj.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
         out = tmp_path / "runs"
         res = CliRunner().invoke(main, [
-            "trajectory-replay", "--url", f"{url}/v1/chat/completions",
+            "agentic", "--url", f"{url}/v1/chat/completions",
             "--model", "target", "--prompts-jsonl", str(traj),
             "--rate", "closed:2", "--duration", "8s",
             "--out-dir", str(out), "--dotenv", "", "--quiet"])
@@ -281,7 +281,7 @@ def test_trajectory_replay_e2e_records_metadata(tmp_path):
         loop.call_soon_threadsafe(loop.stop); t.join(timeout=5)
 
 
-def test_trajectory_replay_interleaved_e2e_completes_all_turns(tmp_path):
+def test_agentic_interleaved_e2e_completes_all_turns(tmp_path):
     # Interleaved mode drives turns through the runner: the completion post-hook
     # gates each session's next turn, so the run must still emit every turn and
     # terminate on exhaustion (no hang, no dropped turns).
@@ -301,7 +301,7 @@ def test_trajectory_replay_interleaved_e2e_completes_all_turns(tmp_path):
         traj.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
         out = tmp_path / "runs"
         res = CliRunner().invoke(main, [
-            "trajectory-replay", "--url", f"{url}/v1/chat/completions",
+            "agentic", "--url", f"{url}/v1/chat/completions",
             "--model", "target", "--prompts-jsonl", str(traj),
             "--concurrent-sessions", "2", "--duration", "8s",
             "--out-dir", str(out), "--dotenv", "", "--quiet"])
@@ -324,13 +324,13 @@ def test_trajectory_replay_interleaved_e2e_completes_all_turns(tmp_path):
         loop.call_soon_threadsafe(loop.stop); t.join(timeout=5)
 
 
-def test_trajectory_source_config_records_field_names(tmp_path):
+def test_agentic_source_config_records_field_names(tmp_path):
     p = tmp_path / "t.jsonl"
     p.write_text(json.dumps({
         "iid": "i1", "mdl": "m",
         "msgs": json.dumps([{"role": "user", "content": "u"},
                             {"role": "assistant", "content": "a"}])}) + "\n")
-    built = get("trajectory-replay").build(
+    built = get("agentic").build(
         _shared(), url="http://x/v1/chat/completions", model="target",
         api_key=None, header=(), dataset=None, prompts_jsonl=str(p),
         split="tool", preset=None, tokenizer=None, messages_field="msgs",

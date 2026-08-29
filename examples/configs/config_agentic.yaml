@@ -9,7 +9,7 @@ workload_type:
   passthrough_meta: true
 
 workload:
-  type: trajectory
+  type: agentic
   dataset: SWE-bench/SWE-smith-trajectories
   split: tool
   tokenizer: Qwen/Qwen2.5-Coder-7B-Instruct

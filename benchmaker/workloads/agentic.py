@@ -1,4 +1,4 @@
-"""Multi-turn trajectory replay workload.
+"""Agentic workload — replay multi-turn agent trajectories.
 
 Expands each agent trajectory into one chat request per assistant turn, sending
 the sanitized message prefix up to (but excluding) that turn. Built for
@@ -170,8 +170,8 @@ class _Session:
         return not self.has_remaining and not self.in_flight
 
 
-class TrajectoryReplayWorkload(Workload):
-    name = "trajectory"
+class AgenticWorkload(Workload):
+    name = "agentic"
 
     def __init__(
         self,
@@ -209,9 +209,9 @@ class TrajectoryReplayWorkload(Workload):
         if name:
             self.name = name
         elif dataset:
-            self.name = f"trajectory:{dataset}/{split}"
+            self.name = f"agentic:{dataset}/{split}"
         else:
-            self.name = f"trajectory:{path}"
+            self.name = f"agentic:{path}"
 
         self._count_tokens = self._make_counter(tokenizer)
         self._gen: Optional[Iterator[dict]] = None
@@ -239,7 +239,7 @@ class TrajectoryReplayWorkload(Workload):
             from transformers import AutoTokenizer
         except ImportError as e:
             raise ImportError(
-                "trajectory replay with --tokenizer needs `transformers`. "
+                "agentic replay with --tokenizer needs `transformers`. "
                 "Install with `pip install transformers` or `pip install -e .[hf]`."
             ) from e
         tok = AutoTokenizer.from_pretrained(tokenizer)
@@ -266,7 +266,7 @@ class TrajectoryReplayWorkload(Workload):
                 from datasets import load_dataset
             except ImportError as e:
                 raise ImportError(
-                    "trajectory replay from a HF dataset needs `datasets`. "
+                    "agentic replay from a HF dataset needs `datasets`. "
                     "Install with `pip install datasets` or `pip install -e .[hf]`."
                 ) from e
             ds = load_dataset(self._dataset, split=self._split, streaming=True,

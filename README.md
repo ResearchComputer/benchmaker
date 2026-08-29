@@ -46,7 +46,7 @@ asyncio.run(main())
 
 Or via the CLI. Workload-specific benchmarks are exposed as **recipes** —
 `benchmaker <recipe> --args` (`http`, `llm`, `sandbox`, `swebench`,
-`swebench-replay`, `sglang`, `trajectory-replay`, `pareval`, `tracelab`):
+`swebench-replay`, `sglang`, `agentic`, `pareval`, `tracelab`):
 
 ```bash
 benchmaker http --url https://httpbin.org/get --rate poisson:50 --duration 10s
@@ -160,7 +160,7 @@ Full docs live in [`docs/`](docs/):
 - [DeepRAG and mixed lanes](docs/deeprag-mix.md) — prefill-heavy RAG and phase-swinging dataset lanes
 - [TraceLab benchmark](docs/tracelab.md) — replay real coding-agent (Claude/Codex) token + prefix-cache distributions
 - [SGLang benchmark](docs/sglang.md) — native SGLang `/generate` benchmark
-- [Trajectory replay](docs/trajectory-replay.md) — multi-turn prefix-cache parity replay
+- [Agentic](docs/agentic.md) — multi-turn prefix-cache parity replay
 
 ## Deterministic replay (`swebench-replay`)
 
@@ -250,13 +250,13 @@ benchmaker/          # library code
     sandbox.py       #   Flash Sandbox workload-type
     sglang.py        #   SGLang native /generate workload-type
     agent.py         #   user-defined Agent workload-type
-    trajectory.py    #   multi-turn trajectory replay workload
+    agentic.py    #   multi-turn agentic replay workload
     tracelab.py     #   TraceLab coding-agent trace (token-faithful replay)
     eval.py          #   correctness/accuracy evaluation
     hf.py            #   HuggingFace dataset source
     datasets.py      #   generic workload/dataset base classes
     base.py          #   WorkloadType base class
-  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, trajectory-replay, pareval, tracelab) + registry
+  recipes/           #   CLI recipes (http, llm, sandbox, swebench, swebench-replay, sglang, agentic, pareval, tracelab) + registry
   swebench/
     trajectory.py    #   convert pi logs to replay trajectories
     replay_server.py #   mock-LLM replay server for swebench-replay

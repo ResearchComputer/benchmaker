@@ -111,7 +111,7 @@ handles reference extraction and correctness grading via the standard
 ## CLI quick-start
 
 One-liner (a *recipe* — `benchmaker <recipe> --args`; recipes: `http`, `llm`,
-`sandbox`, `sglang`, `swebench`, `trajectory-replay`, `swebench-replay`):
+`sandbox`, `sglang`, `swebench`, `agentic`, `swebench-replay`):
 
 ```bash
 benchmaker http \
@@ -137,8 +137,8 @@ benchmaker sglang \
     --prompts-jsonl data.jsonl --prompt-field text \
     --rate poisson:8 --duration 60s
 
-# Trajectory replay (prefix-cache parity):
-benchmaker trajectory-replay --preset swe-smith \
+# Agentic (prefix-cache parity):
+benchmaker agentic --preset swe-smith \
     --url http://host:8000/v1/chat/completions --model $MODEL \
     --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct
 ```

@@ -125,7 +125,7 @@ def live_server():
 def test_registry_has_expected_recipes():
     names = {r.name for r in all_recipes()}
     assert names == {"http", "llm", "sglang", "sandbox", "swebench",
-                     "swebench-replay", "trajectory-replay", "pareval",
+                     "swebench-replay", "agentic", "pareval",
                      "tracelab"}
 
 

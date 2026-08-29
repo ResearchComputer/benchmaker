@@ -51,7 +51,7 @@ A benchmark in benchmaker is the composition of four things:
     harbor; in-container vs host + remote-bash modes, and the one-command runner.
 13. [SGLang benchmarking](sglang.md) — drive the SGLang native `/generate` endpoint;
     raw-text parity checks, streaming metrics.
-14. [Trajectory replay](trajectory-replay.md) — prefix-cache parity benchmarking with
+14. [Agentic](agentic.md) — prefix-cache parity benchmarking with
     multi-turn trajectory datasets; expected vs actual cached tokens.
 15. [Command timeouts under load](command-timeout-under-load.md) — deterministic
     `accuracy(τ)` curve (`τ = T/L`) measuring how per-command timeouts degrade

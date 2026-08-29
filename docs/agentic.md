@@ -1,6 +1,6 @@
-# Trajectory replay (prefix-cache parity)
+# Agentic workloads (prefix-cache parity)
 
-`benchmaker trajectory-replay` expands a multi-turn agent-trajectory dataset
+`benchmaker agentic` expands a multi-turn agent-trajectory dataset
 into one chat request per assistant turn — each request sends the growing
 message prefix up to that turn, which exercises the server's prefix / radix
 cache.
@@ -10,7 +10,7 @@ cache.
 ## Quick start
 
 ```bash
-benchmaker trajectory-replay --preset swe-smith \
+benchmaker agentic --preset swe-smith \
   --url http://host:8000/v1/chat/completions --model $MODEL \
   --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct \
   --max-trajectories 50 --rate closed:4 --out-dir runs/
@@ -22,7 +22,7 @@ hub dataset, split `tool`; needs `pip install -e .[hf]`) or a local
 `--prompts-jsonl` whose rows carry a `messages` field (a list, or the JSON-encoded
 string the dataset ships).
 
-## CLI reference (`benchmaker trajectory-replay`)
+## CLI reference (`benchmaker agentic`)
 
 | Flag                                | Meaning                                                          |
 | ----------------------------------- | --------------------------------------------------------------- |
@@ -58,7 +58,7 @@ workload_type:
   passthrough_meta: true
 
 workload:
-  type: trajectory
+  type: agentic
   dataset: SWE-bench/SWE-smith-trajectories
   split: tool
   tokenizer: Qwen/Qwen2.5-Coder-7B-Instruct
@@ -150,7 +150,7 @@ cross-turn eviction pressure from real multi-turn data.
 ```bash
 # Realistic multi-tenant load: 40 conversations in flight, ~2s think time
 # between a session's turns, exponential gap; rate defaults to closed:40.
-benchmaker trajectory-replay --preset swe-smith \
+benchmaker agentic --preset swe-smith \
   --url http://host:8000/v1/chat/completions --model $MODEL \
   --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct \
   --concurrent-sessions 40 --inter-turn-gap exp:2.0 --out-dir runs/
@@ -171,7 +171,7 @@ than maximal.
 
 ```python
 from benchmaker import (
-    BenchConfig, BenchRunner, OpenAIChatWorkloadType, TrajectoryReplayWorkload,
+    BenchConfig, BenchRunner, OpenAIChatWorkloadType, AgenticWorkload,
     parse_rate_spec,
 )
 
@@ -181,7 +181,7 @@ wt = OpenAIChatWorkloadType(
     passthrough_meta=True,
     max_tokens=1024,
 )
-workload = TrajectoryReplayWorkload(
+workload = AgenticWorkload(
     dataset="SWE-bench/SWE-smith-trajectories",
     split="tool",
     tokenizer="Qwen/Qwen2.5-Coder-7B-Instruct",

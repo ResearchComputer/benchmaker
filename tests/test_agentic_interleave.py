@@ -1,4 +1,4 @@
-"""Interleaved / concurrent-session scheduling for trajectory replay.
+"""Interleaved / concurrent-session scheduling for agentic replay.
 
 Covers the inter-turn gap distribution parser and the round-robin session
 scheduler that gates each session's turn k+1 on turn k's completion (+ gap).
@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from benchmaker.workloads.trajectory import (
-    TrajectoryReplayWorkload,
+from benchmaker.workloads.agentic import (
+    AgenticWorkload,
     parse_gap_spec,
 )
 
@@ -89,7 +89,7 @@ async def test_interleave_round_robins_turns_across_sessions(tmp_path):
     # Two sessions, two turns each. Turn k of every session goes out before any
     # session's turn k+1; each session's turn k+1 waits for turn k to complete.
     path = _write_trajs(tmp_path, [("i1", 2), ("i2", 2)])
-    wl = TrajectoryReplayWorkload(path=path, concurrent_sessions=2)
+    wl = AgenticWorkload(path=path, concurrent_sessions=2)
 
     a = await wl.next_item()                    # i1 turn0
     b = await wl.next_item()                     # i2 turn0 (i1 in flight)
@@ -109,7 +109,7 @@ async def test_interleave_round_robins_turns_across_sessions(tmp_path):
 async def test_interleave_gates_next_turn_until_prior_completes(tmp_path):
     # One session, concurrency 1: turn1 must not be emitted until turn0 completes.
     path = _write_trajs(tmp_path, [("i1", 2)])
-    wl = TrajectoryReplayWorkload(path=path, concurrent_sessions=1)
+    wl = AgenticWorkload(path=path, concurrent_sessions=1)
 
     first = await wl.next_item()
     assert _key(first) == ("i1", 0)
@@ -130,7 +130,7 @@ async def test_interleave_gates_next_turn_until_prior_completes(tmp_path):
 async def test_interleave_inter_turn_gap_defers_next_turn(tmp_path):
     # With a long gap, the session is not eligible immediately after completion.
     path = _write_trajs(tmp_path, [("i1", 2)])
-    wl = TrajectoryReplayWorkload(
+    wl = AgenticWorkload(
         path=path, concurrent_sessions=1, inter_turn_gap="const:30s")
 
     await wl.next_item()                         # i1 turn0
@@ -145,7 +145,7 @@ async def test_completion_post_hook_extracts_conversation_id(tmp_path):
     from benchmaker.core.types import Request, Response, Sample
 
     path = _write_trajs(tmp_path, [("i1", 2)])
-    wl = TrajectoryReplayWorkload(path=path, concurrent_sessions=1)
+    wl = AgenticWorkload(path=path, concurrent_sessions=1)
 
     item = await wl.next_item()
     req = Request(meta={"conversation_id": "i1", "turn_index": 0})
@@ -167,7 +167,7 @@ async def test_interleave_respects_max_turns_and_skips_empty(tmp_path):
         _traj("i2", 3),
     ]
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    wl = TrajectoryReplayWorkload(
+    wl = AgenticWorkload(
         path=str(p), concurrent_sessions=4, max_turns_per_trajectory=1,
         max_trajectories=2)
 
@@ -187,7 +187,7 @@ async def test_interleave_respects_max_turns_and_skips_empty(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# trajectory-replay recipe wiring
+# agentic recipe wiring
 # --------------------------------------------------------------------------
 
 from benchmaker.recipes import get
@@ -210,7 +210,7 @@ def _build(tmp_path, **overrides):
         model_field="model", max_tokens=256, max_turns_per_trajectory=None,
         max_trajectories=None, concurrent_sessions=None, inter_turn_gap=None)
     params.update(overrides)
-    return get("trajectory-replay").build(_shared(), **params)
+    return get("agentic").build(_shared(), **params)
 
 
 def test_recipe_interleave_installs_hook_and_defaults_rate(tmp_path):
@@ -243,13 +243,13 @@ def test_recipe_source_config_records_interleave_fields(tmp_path):
 
 def test_completion_hook_none_in_contiguous_mode(tmp_path):
     path = _write_trajs(tmp_path, [("i1", 2)])
-    wl = TrajectoryReplayWorkload(path=path)               # contiguous
+    wl = AgenticWorkload(path=path)               # contiguous
     assert wl.completion_hook() is None
 
 
 def test_completion_hook_present_in_interleaved_mode(tmp_path):
     path = _write_trajs(tmp_path, [("i1", 2)])
-    wl = TrajectoryReplayWorkload(path=path, concurrent_sessions=2)
+    wl = AgenticWorkload(path=path, concurrent_sessions=2)
     assert wl.completion_hook() == wl.note_complete_hook
 
 
@@ -262,7 +262,7 @@ def test_build_config_autowires_completion_hook(tmp_path):
     cfg = {
         "workload_type": {"type": "openai-chat",
                           "url": "http://x/v1/chat/completions", "model": "m"},
-        "workload": {"type": "trajectory", "path": path,
+        "workload": {"type": "agentic", "path": path,
                      "concurrent_sessions": 2},
         "load": "closed:2",
     }
@@ -270,14 +270,14 @@ def test_build_config_autowires_completion_hook(tmp_path):
     assert bc.workload.completion_hook() in bc.post_hooks
 
 
-def test_build_config_no_hook_for_contiguous_trajectory(tmp_path):
+def test_build_config_no_hook_for_contiguous_agentic(tmp_path):
     from benchmaker.config import build_config
 
     path = _write_trajs(tmp_path, [("i1", 2)])
     cfg = {
         "workload_type": {"type": "openai-chat",
                           "url": "http://x/v1/chat/completions", "model": "m"},
-        "workload": {"type": "trajectory", "path": path},
+        "workload": {"type": "agentic", "path": path},
         "load": "closed:2",
     }
     bc = build_config(cfg, dotenv_path=None)

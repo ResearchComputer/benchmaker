@@ -160,9 +160,9 @@ def build_workload(spec: Any) -> Workload:
         return DeepRAGWorkload(**kwargs)
     if t in ("tracelab", "trace-lab", "trace"):
         return TraceLabWorkload(**kwargs)
-    if t == "trajectory":
-        from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
-        return TrajectoryReplayWorkload(**kwargs)
+    if t == "agentic":
+        from benchmaker.workloads.agentic import AgenticWorkload
+        return AgenticWorkload(**kwargs)
     raise ValueError(f"Unknown workload type {t!r}")
 
 
@@ -429,7 +429,7 @@ def build_config(cfg: dict, dotenv_path: Optional[str] = ".env",
         post_hooks = list(post_hooks) + list(extra_post)
 
     # A workload that schedules on per-request completion (e.g. interleaved
-    # trajectory replay) declares the post-hook it needs; install it so a YAML
+    # agentic replay) declares the post-hook it needs; install it so a YAML
     # config can't silently stall waiting for a signal it never wired up.
     workloads = [lane.workload for lane in lanes] if lanes else [workload]
     for lane_workload in workloads:

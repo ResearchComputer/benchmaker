@@ -1,4 +1,4 @@
-"""``trajectory-replay`` recipe — prefix-replay multi-turn trajectory datasets.
+"""``agentic`` recipe — prefix-replay multi-turn agent trajectory datasets.
 
 Expands each trajectory into one chat request per assistant turn (growing shared
 prefix) against an OpenAI-compatible endpoint, recording the prefix-cache parity
@@ -37,8 +37,8 @@ _PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-class TrajectoryReplayRecipe(Recipe):
-    name = "trajectory-replay"
+class AgenticRecipe(Recipe):
+    name = "agentic"
     help = ("Prefix-replay a multi-turn trajectory dataset (e.g. SWE-smith) "
             "against an OpenAI-compatible endpoint; one request per assistant "
             "turn, recording expected vs actual cached prefix tokens.")
@@ -100,7 +100,7 @@ class TrajectoryReplayRecipe(Recipe):
               model_field, max_tokens, max_turns_per_trajectory, max_trajectories,
               concurrent_sessions=None, inter_turn_gap=None) -> BuildResult:
         from benchmaker.workloads.llm import OpenAIChatWorkloadType
-        from benchmaker.workloads.trajectory import TrajectoryReplayWorkload
+        from benchmaker.workloads.agentic import AgenticWorkload
 
         if preset:
             if preset not in _PRESETS:
@@ -120,7 +120,7 @@ class TrajectoryReplayRecipe(Recipe):
             max_tokens=max_tokens, timeout_s=shared.timeout_s,
             headers=parse_headers(header), passthrough_meta=True)
 
-        workload = TrajectoryReplayWorkload(
+        workload = AgenticWorkload(
             dataset=dataset, split=split, path=prompts_jsonl,
             messages_field=messages_field, id_field=id_field,
             model_field=model_field, max_tokens=max_tokens,
@@ -132,7 +132,7 @@ class TrajectoryReplayRecipe(Recipe):
             "workload_type": {"type": "openai-chat", "url": wt._url,
                               "model": wt._model, "passthrough_meta": True,
                               "max_tokens": max_tokens},
-            "workload": {"type": "trajectory", "dataset": dataset,
+            "workload": {"type": "agentic", "dataset": dataset,
                          "split": split, "path": prompts_jsonl,
                          "messages_field": messages_field, "id_field": id_field,
                          "model_field": model_field, "tokenizer": tokenizer,
@@ -160,4 +160,4 @@ class TrajectoryReplayRecipe(Recipe):
             default_rate=default_rate, default_duration="24h")
 
 
-register(TrajectoryReplayRecipe())
+register(AgenticRecipe())

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Breaking:** renamed the `trajectory-replay` workload to `agentic`, since it
+  represents multi-turn *agentic* workloads. The CLI recipe is now
+  `benchmaker agentic` (was `trajectory-replay`); the YAML workload `type:
+  trajectory` is now `type: agentic`; and `TrajectoryReplayWorkload` is now
+  `AgenticWorkload` (in `benchmaker.workloads.agentic`). The underlying
+  recorded-data concept (a "trajectory" of agent turns) and its flags
+  (`--max-trajectories`, `--max-turns-per-trajectory`, `expand_trajectory`)
+  are unchanged. The separate SWE-bench `trajectory` module and
+  `swebench-replay` recipe are unaffected.
 - Fixed `OpenAIChatWorkloadType` silently ignoring `delta.reasoning_content`
   for thinking models (GLM-4.x, DeepSeek-R1, Qwen3-thinking, gpt-5 reasoning,
   …), which made `ttft_s`, `itl_ms_*`, and (when `usage` was absent)

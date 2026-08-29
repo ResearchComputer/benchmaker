@@ -6,7 +6,7 @@ into two groups:
 - **Recipes** — named, self-contained benchmark scenarios you run as
   `benchmaker <recipe> --args`: `http` (one-off HTTP), `llm` (OpenAI-compatible
   chat), `sandbox` (Flash Sandbox), `swebench` (SWE-bench Verified eval),
-  `sglang` (SGLang native `/generate`), `trajectory-replay` (prefix-cache
+  `sglang` (SGLang native `/generate`), `agentic` (prefix-cache
   parity), and `swebench-replay` (deterministic SWE-bench re-evaluation).
 - **Infra commands** — `run` (drive any benchmark from a YAML config file) and
   `collect` (pivot many run-dirs into a table).
@@ -141,7 +141,7 @@ Recipe options (plus the shared flags above):
 | `--top-k`                     | Top-k sampling                                                         |
 | `--extra`                     | Pass-through `'key=value'` (value JSON-decoded if possible) — repeatable |
 
-## `benchmaker trajectory-replay`
+## `benchmaker agentic`
 
 Prefix-replay a multi-turn trajectory dataset (e.g. SWE-smith) against an
 OpenAI-compatible endpoint. Each trajectory is expanded into one chat request
@@ -155,7 +155,7 @@ upper bound) vs `extra.cached_tokens` (server actual). The ratio is the
 prefix-cache hit efficiency.
 
 ```bash
-benchmaker trajectory-replay --preset swe-smith \
+benchmaker agentic --preset swe-smith \
     --url http://host:8000/v1/chat/completions --model $MODEL \
     --tokenizer Qwen/Qwen2.5-Coder-7B-Instruct \
     --max-trajectories 50 --rate closed:4 --out-dir runs/
@@ -452,8 +452,8 @@ progress_every_s: 1.0                # 0 disables progress output
   [Workloads & workload-types](workloads.md#hfdatasetworkload).
 - `deeprag` (or `deep-rag`) — `DeepRAGWorkload(...)`, reading prepared
   multi-passage QA JSONL. See [DeepRAG and mixed lanes](deeprag-mix.md).
-- `trajectory` — `TrajectoryReplayWorkload(...)`. Expand multi-turn trajectories
-  into per-turn items. See [Trajectory replay](trajectory-replay.md).
+- `agentic` — `AgenticWorkload(...)`. Expand multi-turn trajectories
+  into per-turn items. See [Agentic](agentic.md).
 - `factory: 'module:fn'` — call `fn(**kwargs)`; must return a `Workload`.
 
 You can also write a workload as bare YAML for two shortcuts:

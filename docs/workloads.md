@@ -407,7 +407,7 @@ workload_type:
   extra_meta_keys: [task_id]
 ```
 
-### `TrajectoryReplayWorkload`
+### `AgenticWorkload`
 
 Expands multi-turn agent trajectories into one chat request per assistant
 turn — each request sends the growing message prefix up to (but excluding)
@@ -415,7 +415,7 @@ that turn. Built for prefix-cache / HiCache parity benchmarking against an
 OpenAI-compatible chat endpoint.
 
 ```python
-TrajectoryReplayWorkload(
+AgenticWorkload(
     dataset=None,                   # HuggingFace dataset id (needs `datasets`)
     path=None,                      # or local JSONL file
     split="tool",                   # dataset split
