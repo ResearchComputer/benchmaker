@@ -76,6 +76,14 @@ class AgenticRecipe(Recipe):
                          show_default=True),
             click.option("--max-tokens", "max_tokens", type=int, default=1024,
                          show_default=True, help="Per-request generation cap."),
+            click.option("--min-tokens", "min_tokens", type=int, default=None,
+                         help="vLLM/SGLang extension: minimum tokens before EOS. "
+                              "For fixed-output A/Bs set equal to --max-tokens."),
+            click.option("--ignore-eos/--no-ignore-eos", "ignore_eos",
+                         default=None,
+                         help="vLLM/SGLang extension: keep generating past EOS. "
+                              "Pair with --min-tokens N --max-tokens N for "
+                              "exact fixed output across benchmark arms."),
             click.option("--max-turns-per-trajectory", "max_turns_per_trajectory",
                          type=int, default=None,
                          help="Cap assistant turns replayed per trajectory."),
@@ -97,11 +105,21 @@ class AgenticRecipe(Recipe):
 
     def build(self, shared: SharedOpts, *, url, model, api_key, header, dataset,
               prompts_jsonl, split, preset, tokenizer, messages_field, id_field,
-              model_field, max_tokens, max_turns_per_trajectory, max_trajectories,
+              model_field, max_tokens, min_tokens=None, ignore_eos=None,
+              max_turns_per_trajectory, max_trajectories,
               concurrent_sessions=None, inter_turn_gap=None) -> BuildResult:
         from benchmaker.workloads.llm import OpenAIChatWorkloadType
         from benchmaker.workloads.agentic import AgenticWorkload
 
+        # max_tokens is only a cap: paired requests can stop at different EOS
+        # positions, so A/B arms diverge in output length. min_tokens (>= max is
+        # rejected below) + ignore_eos force the server to decode exactly N
+        # tokens, keeping request work identical across arms rather than merely
+        # capped (#16).
+        if min_tokens is not None and min_tokens > max_tokens:
+            raise click.UsageError(
+                f"--min-tokens ({min_tokens}) must not exceed "
+                f"--max-tokens ({max_tokens}); for fixed output set both equal.")
         if preset:
             if preset not in _PRESETS:
                 raise click.BadParameter(
@@ -115,10 +133,19 @@ class AgenticRecipe(Recipe):
             raise click.UsageError(
                 "provide exactly one of --dataset/--preset or --prompts-jsonl.")
 
+        wt_kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "timeout_s": shared.timeout_s,
+            "headers": parse_headers(header),
+            "passthrough_meta": True,
+        }
+        if min_tokens is not None:
+            wt_kwargs["min_tokens"] = min_tokens
+        if ignore_eos is not None:
+            wt_kwargs["ignore_eos"] = ignore_eos
         wt = OpenAIChatWorkloadType.from_env(
             url=url, model=model, api_key=api_key, dotenv_path=shared.dotenv,
-            max_tokens=max_tokens, timeout_s=shared.timeout_s,
-            headers=parse_headers(header), passthrough_meta=True)
+            **wt_kwargs)
 
         workload = AgenticWorkload(
             dataset=dataset, split=split, path=prompts_jsonl,
@@ -130,8 +157,9 @@ class AgenticRecipe(Recipe):
 
         source_config = {
             "workload_type": {"type": "openai-chat", "url": wt._url,
-                              "model": wt._model, "passthrough_meta": True,
-                              "max_tokens": max_tokens},
+                              "model": wt._model,
+                              **{k: v for k, v in wt_kwargs.items()
+                                 if k != "headers"}},
             "workload": {"type": "agentic", "dataset": dataset,
                          "split": split, "path": prompts_jsonl,
                          "messages_field": messages_field, "id_field": id_field,

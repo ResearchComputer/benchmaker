@@ -341,3 +341,91 @@ def test_agentic_source_config_records_field_names(tmp_path):
     assert wl_cfg["id_field"] == "iid"
     assert wl_cfg["model_field"] == "mdl"
     assert built.source_config["workload_type"]["max_tokens"] == 256
+
+
+# --------------------------------------------------------------------------
+# min_tokens / ignore_eos — fixed-output A/B control (#16).
+# max_tokens is only a cap; paired requests can stop at different EOS
+# positions. min_tokens + ignore_eos force the server to decode exactly N
+# tokens so both arms generate identical request work.
+# --------------------------------------------------------------------------
+import click
+import pytest
+
+
+def _build_agentic(tmp_path, **over):
+    p = tmp_path / "t.jsonl"
+    p.write_text(json.dumps({
+        "instance_id": "i1", "model": "m",
+        "messages": json.dumps([{"role": "user", "content": "u"},
+                                {"role": "assistant", "content": "a"}])}) + "\n")
+    kw = dict(url="http://x/v1/chat/completions", model="target", api_key=None,
+              header=(), dataset=None, prompts_jsonl=str(p), split="tool",
+              preset=None, tokenizer=None, messages_field="messages",
+              id_field="instance_id", model_field="model", max_tokens=256,
+              min_tokens=None, ignore_eos=None, max_turns_per_trajectory=None,
+              max_trajectories=None)
+    kw.update(over)
+    return get("agentic").build(_shared(), **kw)
+
+
+def test_agentic_help_documents_min_tokens_and_ignore_eos():
+    res = CliRunner().invoke(main, ["agentic", "--help"])
+    assert res.exit_code == 0, res.output
+    for flag in ("--min-tokens", "--ignore-eos", "--no-ignore-eos"):
+        assert flag in res.output
+    # The cap vs. fixed-output distinction is the whole point of the flags.
+    assert "fixed" in res.output.lower()
+
+
+def test_agentic_min_tokens_exceeding_max_rejected(tmp_path):
+    with pytest.raises(click.UsageError) as exc:
+        _build_agentic(tmp_path, max_tokens=32, min_tokens=64)
+    assert "min-tokens" in str(exc.value)
+    assert "max-tokens" in str(exc.value)
+
+
+def test_agentic_fixed_output_recorded_in_source_config(tmp_path):
+    # --max-tokens 64 --min-tokens 64 --ignore-eos: the resolved values are
+    # recorded in the reproducible source_config / bundle metadata (#16).
+    built = _build_agentic(tmp_path, max_tokens=64, min_tokens=64,
+                          ignore_eos=True)
+    wt_cfg = built.source_config["workload_type"]
+    assert wt_cfg["max_tokens"] == 64
+    assert wt_cfg["min_tokens"] == 64
+    assert wt_cfg["ignore_eos"] is True
+
+
+async def test_agentic_fixed_output_reaches_request_json(tmp_path):
+    # The flags forward to OpenAIChatWorkloadType, so the engine receives them
+    # in the request body (not just recorded in metadata).
+    built = _build_agentic(tmp_path, max_tokens=64, min_tokens=64,
+                          ignore_eos=True)
+    item = await built.workload.next_item()
+    body = (await built.workload_type.make_request(item)).json
+    assert body["max_tokens"] == 64
+    assert body["min_tokens"] == 64
+    assert body["ignore_eos"] is True
+
+
+async def test_agentic_default_build_omits_min_tokens_and_ignore_eos(tmp_path):
+    # Default behavior is unchanged: nothing is sent the server doesn't expect,
+    # and the bundle records the absence (not a spurious null).
+    built = _build_agentic(tmp_path)
+    wt_cfg = built.source_config["workload_type"]
+    assert "min_tokens" not in wt_cfg
+    assert "ignore_eos" not in wt_cfg
+    item = await built.workload.next_item()
+    body = (await built.workload_type.make_request(item)).json
+    assert "min_tokens" not in body
+    assert "ignore_eos" not in body
+    # The cap is still present (it always was).
+    assert body["max_tokens"] == 256
+
+
+def test_agentic_ignore_eos_without_min_tokens_builds(tmp_path):
+    # ignore_eos alone is a valid knob (decode until max_tokens or the model's
+    # own stop); only min_tokens > max_tokens is rejected.
+    built = _build_agentic(tmp_path, max_tokens=64, ignore_eos=True)
+    assert built.source_config["workload_type"]["ignore_eos"] is True
+    assert "min_tokens" not in built.source_config["workload_type"]
