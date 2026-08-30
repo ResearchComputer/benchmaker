@@ -117,20 +117,15 @@ def test_parse_exec_response_non_dict():
 
 class _FakeResp:
     def __init__(self, status, text="", payload=None):
-        self.status = status
+        self.status_code = status
         self._text = text
         self._payload = payload
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def text(self):
+    @property
+    def text(self):
         return self._text
 
-    async def read(self):
+    async def aread(self):
         return b""
 
 
@@ -141,7 +136,7 @@ class _FakeSession:
         self.calls = []
         self.closed = False
 
-    def post(self, url, **kw):
+    async def post(self, url, **kw):
         self.calls.append(("POST", url, kw))
         if url.endswith("/sandboxes"):
             return _FakeResp(200, text='{"id": "sb-123"}')
@@ -149,21 +144,21 @@ class _FakeSession:
         import json
         return _FakeResp(200, text=json.dumps({"exit_code": 7, "stdout": "OUT", "stderr": "ERR"}))
 
-    def put(self, url, **kw):
+    async def put(self, url, **kw):
         self.calls.append(("PUT", url, kw))
         return _FakeResp(200, text="")
 
-    def delete(self, url, **kw):
+    async def delete(self, url, **kw):
         self.calls.append(("DELETE", url, kw))
         return _FakeResp(200, text="")
 
-    async def close(self):
+    async def aclose(self):
         self.closed = True
 
 
 async def test_roundtrip_mocked(monkeypatch):
     fake = _FakeSession()
-    monkeypatch.setattr("benchmaker.pareval.flash.aiohttp.ClientSession", lambda *a, **k: fake)
+    monkeypatch.setattr("benchmaker.pareval.flash.httpx2.AsyncClient", lambda *a, **k: fake)
 
     async with FlashSandbox("http://h:8080", image="pareval-toolchain") as sb:
         await sb.write_file("/tmp/pareval/x.hpp", b"code")
@@ -183,14 +178,14 @@ async def test_roundtrip_mocked(monkeypatch):
 
 async def test_exec_http_error_returns_negative_rc(monkeypatch):
     class _ErrSession(_FakeSession):
-        def post(self, url, **kw):
+        async def post(self, url, **kw):
             self.calls.append(("POST", url, kw))
             if url.endswith("/sandboxes"):
                 return _FakeResp(200, text='{"id": "sb-1"}')
             return _FakeResp(500, text="kaboom")
 
     fake = _ErrSession()
-    monkeypatch.setattr("benchmaker.pareval.flash.aiohttp.ClientSession", lambda *a, **k: fake)
+    monkeypatch.setattr("benchmaker.pareval.flash.httpx2.AsyncClient", lambda *a, **k: fake)
     async with FlashSandbox("http://h", image="img") as sb:
         rc, out = await sb.exec("boom", timeout_s=1.0)
     assert rc == -1

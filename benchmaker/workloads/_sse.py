@@ -1,7 +1,7 @@
 """Shared helper for parsing streamed Server-Sent-Events (SSE) responses.
 
 The runner captures a streaming response as ``Response.stream_chunks`` — the raw
-byte chunks yielded by aiohttp's ``resp.content.iter_any()``, which land on
+byte chunks yielded by httpx2's ``resp.aiter_raw()``, which land on
 *arbitrary* byte boundaries. A single SSE event (a ``data: {...}`` line) may
 therefore be split across two chunks, and — because it is the last and largest
 line — the final ``usage`` / ``meta_info`` event is the most likely to be split.

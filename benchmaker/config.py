@@ -219,7 +219,7 @@ def build_scorer(spec: Any) -> tuple[Scorer, Optional[Callable[[], Any]]]:
     A bare string ("exact_match") is shorthand for `{type: <that>}`.
 
     The aclose callable, when not None, owns transient resources held by the
-    scorer (e.g. a judge LLM's aiohttp session). The YAML build path wires it
+    scorer (e.g. a judge LLM's httpx2 client). The YAML build path wires it
     into the wrapped workload-type's `aclose` chain.
     """
     if spec is None:

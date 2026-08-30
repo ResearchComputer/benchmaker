@@ -99,7 +99,7 @@ import shlex
 import time
 from typing import Any, Optional
 
-import aiohttp
+import httpx2
 
 from benchmaker.core.types import Request, Response, Sample, TicketContext, maybe_await
 from benchmaker.workloads.base import WorkloadType, _estimate_request_size
@@ -182,7 +182,7 @@ class SandboxWorkloadType(WorkloadType):
 
         self._owned_sandbox = False
         self._create_lock = asyncio.Lock()
-        self._aux_session: Optional[aiohttp.ClientSession] = None
+        self._aux_session: Optional[httpx2.AsyncClient] = None
         self._aux_session_lock = asyncio.Lock()
 
     async def make_request(self, item: Any) -> Request:
@@ -587,29 +587,29 @@ class SandboxWorkloadType(WorkloadType):
         if self._ttl_seconds is not None and "ttl_seconds" not in body:
             body["ttl_seconds"] = self._ttl_seconds
         session = await self._get_aux_session()
-        timeout = aiohttp.ClientTimeout(total=self._create_timeout_s)
-        async with session.post(
+        timeout = httpx2.Timeout(self._create_timeout_s)
+        resp = await session.post(
             f"{self._base_url}{self._prefix}",
             json=body,
             headers=self._headers,
             timeout=timeout,
-        ) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"sandbox create failed: HTTP {resp.status}: {text}")
-            try:
-                data = json.loads(text)
-            except ValueError as e:
-                raise RuntimeError(f"sandbox create returned non-JSON: {text!r}") from e
-            if not isinstance(data, dict) or "id" not in data:
-                raise RuntimeError(f"sandbox create returned unexpected body: {data!r}")
-            return str(data["id"])
+        )
+        text = resp.text
+        if resp.status_code >= 400:
+            raise RuntimeError(f"sandbox create failed: HTTP {resp.status_code}: {text}")
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise RuntimeError(f"sandbox create returned non-JSON: {text!r}") from e
+        if not isinstance(data, dict) or "id" not in data:
+            raise RuntimeError(f"sandbox create returned unexpected body: {data!r}")
+        return str(data["id"])
 
-    async def _get_aux_session(self) -> aiohttp.ClientSession:
+    async def _get_aux_session(self) -> httpx2.AsyncClient:
         if self._aux_session is None:
             async with self._aux_session_lock:
                 if self._aux_session is None:
-                    self._aux_session = aiohttp.ClientSession()
+                    self._aux_session = httpx2.AsyncClient()
         return self._aux_session
 
     async def aclose(self) -> None:
@@ -617,13 +617,13 @@ class SandboxWorkloadType(WorkloadType):
             sid = self._sandbox_id
             try:
                 session = await self._get_aux_session()
-                timeout = aiohttp.ClientTimeout(total=self._create_timeout_s)
-                async with session.delete(
+                timeout = httpx2.Timeout(self._create_timeout_s)
+                resp = await session.delete(
                     f"{self._base_url}{self._prefix}/{sid}",
                     headers=self._headers,
                     timeout=timeout,
-                ) as resp:
-                    await resp.read()
+                )
+                await resp.aread()
             except Exception:
                 pass
             finally:
@@ -631,7 +631,7 @@ class SandboxWorkloadType(WorkloadType):
                 self._owned_sandbox = False
         if self._aux_session is not None:
             try:
-                await self._aux_session.close()
+                await self._aux_session.aclose()
             finally:
                 self._aux_session = None
 

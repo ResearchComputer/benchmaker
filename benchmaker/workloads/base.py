@@ -57,7 +57,7 @@ class WorkloadType(ABC):
 
         Override to implement multi-step protocols (e.g. create → exec → delete).
         Use `ctx.fire(req)` to issue requests; it applies pre-hooks and uses
-        the shared aiohttp session.
+        the shared httpx2 async client.
         """
         req = await self.make_request(ctx.item)
         resp = await ctx.fire(req)

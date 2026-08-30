@@ -39,8 +39,9 @@ def main(log_level: str) -> None:
     # Chatty third-party loggers (one INFO line per HTTP request / hub fetch)
     # drown out our own output. Pin them to WARNING unless DEBUG was requested.
     if level != "DEBUG":
-        for noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub",
-                      "filelock", "fsspec", "datasets", "aiohttp"):
+        for noisy in ("httpx", "httpx2", "httpcore", "httpcore2", "urllib3",
+                      "huggingface_hub", "filelock", "fsspec", "datasets",
+                      "aiohttp"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

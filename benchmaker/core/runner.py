@@ -1,5 +1,5 @@
 """BenchRunner: ties scheduler -> workload (dataset) -> workload-type ->
-aiohttp session -> metrics."""
+httpx2 async client -> metrics."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import aiohttp
+import httpx2
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +91,19 @@ class BenchRunner:
         self.metrics = MetricsAggregator()
 
     async def run(self) -> BenchResult:
-        connector = aiohttp.TCPConnector(
-            limit=self.cfg.connection_limit,
-            ttl_dns_cache=300,
-            force_close=False,
+        # httpx2 has no per-connector force_close / ttl_dns_cache knobs; pooling
+        # is governed by Limits. force_close=False (keepalive on) maps to
+        # allowing up to `connection_limit` keep-alive connections, matching the
+        # previous aiohttp pool behaviour. httpx2 resolves DNS through the
+        # system resolver per connection (no in-process TTL cache).
+        limits = httpx2.Limits(
+            max_connections=self.cfg.connection_limit,
+            max_keepalive_connections=self.cfg.connection_limit,
         )
-        timeout = aiohttp.ClientTimeout(total=self.cfg.timeout_s)
+        timeout = httpx2.Timeout(self.cfg.timeout_s)
         if self.cfg.recorder is not None:
             self.cfg.recorder.open(start_mono=self.metrics.start_time)
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with httpx2.AsyncClient(limits=limits, timeout=timeout) as session:
             try:
                 await self._drive(session)
             finally:
@@ -110,7 +114,7 @@ class BenchRunner:
         self.metrics.finalize()
         return BenchResult(samples=self.metrics.samples, summary=self.metrics.summary())
 
-    async def _drive(self, session: aiohttp.ClientSession) -> None:
+    async def _drive(self, session: httpx2.AsyncClient) -> None:
         sem = asyncio.Semaphore(self.cfg.max_in_flight)
         tasks: set[asyncio.Task] = set()
         progress_task = asyncio.create_task(self._progress_loop())
@@ -145,7 +149,7 @@ class BenchRunner:
             if monitor_tasks:
                 await asyncio.gather(*monitor_tasks, return_exceptions=True)
 
-    async def _drive_single(self, session: aiohttp.ClientSession,
+    async def _drive_single(self, session: httpx2.AsyncClient,
                             sem: asyncio.Semaphore,
                             tasks: set[asyncio.Task]) -> None:
         assert self.cfg.load is not None
@@ -164,7 +168,7 @@ class BenchRunner:
             tasks.add(task)
             task.add_done_callback(tasks.discard)
 
-    async def _drive_lanes(self, session: aiohttp.ClientSession,
+    async def _drive_lanes(self, session: httpx2.AsyncClient,
                            sem: asyncio.Semaphore,
                            tasks: set[asyncio.Task]) -> None:
         """Run each lane's admission iterator concurrently.
@@ -199,7 +203,7 @@ class BenchRunner:
                     producer.cancel()
             await asyncio.gather(*producers, return_exceptions=True)
 
-    async def _fire(self, session: aiohttp.ClientSession, item: Any,
+    async def _fire(self, session: httpx2.AsyncClient, item: Any,
                     sem: asyncio.Semaphore, load: LoadModel,
                     lane_name: Optional[str] = None) -> None:
         start_mono = time.monotonic()
@@ -251,54 +255,64 @@ class BenchRunner:
                 closed.add(id(workload))
                 await workload.aclose()
 
-    async def _execute(self, session: aiohttp.ClientSession, req: Request,
+    async def _execute(self, session: httpx2.AsyncClient, req: Request,
                        start_mono: float) -> Response:
         kwargs: dict = {"headers": req.headers, "params": req.params}
         if req.json is not None:
             kwargs["json"] = req.json
         elif req.body is not None:
-            kwargs["data"] = req.body
+            kwargs["content"] = req.body
         if req.timeout_s is not None:
-            kwargs["timeout"] = aiohttp.ClientTimeout(total=req.timeout_s)
+            kwargs["timeout"] = httpx2.Timeout(req.timeout_s)
 
         try:
-            async with session.request(req.method, req.url, **kwargs) as resp:
-                if self.cfg.workload_type.streaming:
-                    chunks: list[bytes] = []
-                    chunk_times: list[float] = []
-                    body_parts: list[bytes] = []
-                    async for chunk in resp.content.iter_any():
+            if self.cfg.workload_type.streaming:
+                # Stream so each network read surfaces as a separate chunk,
+                # preserving per-chunk timing (TTFT/ITL). httpx2's aiter_raw()
+                # yields bytes at arbitrary boundaries exactly like aiohttp's
+                # content.iter_any(), so the SSE reassembler in workloads/_sse.py
+                # still rejoins events split across chunks (#13).
+                chunks: list[bytes] = []
+                chunk_times: list[float] = []
+                async with session.stream(req.method, req.url, **kwargs) as resp:
+                    async for chunk in resp.aiter_raw():
                         chunks.append(chunk)
                         chunk_times.append(time.monotonic() - start_mono)
-                        body_parts.append(chunk)
-                    body = b"".join(body_parts)
+                    body = b"".join(chunks)
                     elapsed = time.monotonic() - start_mono
                     return Response(
-                        status=resp.status,
+                        status=resp.status_code,
                         headers=dict(resp.headers),
                         body=body,
                         elapsed_s=elapsed,
-                        ok=200 <= resp.status < 400,
+                        ok=200 <= resp.status_code < 400,
                         stream_chunks=chunks,
                         stream_chunk_times=chunk_times,
                     )
-                else:
-                    body = await resp.read()
-                    elapsed = time.monotonic() - start_mono
-                    return Response(
-                        status=resp.status,
-                        headers=dict(resp.headers),
-                        body=body,
-                        elapsed_s=elapsed,
-                        ok=200 <= resp.status < 400,
-                    )
+            else:
+                resp = await session.request(req.method, req.url, **kwargs)
+                body = resp.content
+                elapsed = time.monotonic() - start_mono
+                return Response(
+                    status=resp.status_code,
+                    headers=dict(resp.headers),
+                    body=body,
+                    elapsed_s=elapsed,
+                    ok=200 <= resp.status_code < 400,
+                )
         except asyncio.TimeoutError:
             return Response(
                 status=0, headers={}, body=b"",
                 elapsed_s=time.monotonic() - start_mono,
                 ok=False, error="timeout",
             )
-        except aiohttp.ClientError as e:
+        except httpx2.TimeoutException:
+            return Response(
+                status=0, headers={}, body=b"",
+                elapsed_s=time.monotonic() - start_mono,
+                ok=False, error="timeout",
+            )
+        except httpx2.HTTPError as e:
             return Response(
                 status=0, headers={}, body=b"",
                 elapsed_s=time.monotonic() - start_mono,

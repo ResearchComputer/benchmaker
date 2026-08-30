@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-import aiohttp
+import httpx2
 
 PREFIX_CLUSTER = "/sandboxes"
 _EXCERPT_MAX = 500
@@ -123,24 +123,24 @@ class FlashSandbox:
         hdrs.setdefault("Content-Type", "application/json")
         self._headers = hdrs
 
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: Optional[httpx2.AsyncClient] = None
         self._sandbox_id: Optional[str] = None
 
     async def __aenter__(self) -> "FlashSandbox":
-        self._session = aiohttp.ClientSession()
+        self._session = httpx2.AsyncClient()
         body = _create_body(self._image)
         url = _create_url(self._base_url, self._prefix)
-        timeout = aiohttp.ClientTimeout(total=self._create_timeout_s)
-        async with self._session.post(
+        timeout = httpx2.Timeout(self._create_timeout_s)
+        resp = await self._session.post(
             url, headers=self._headers, json=body, timeout=timeout
-        ) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"sandbox create HTTP {resp.status}: {_excerpt(text)}")
-            try:
-                data = json.loads(text)
-            except ValueError as e:
-                raise RuntimeError(f"sandbox create returned non-JSON: {_excerpt(text)}") from e
+        )
+        text = resp.text
+        if resp.status_code >= 400:
+            raise RuntimeError(f"sandbox create HTTP {resp.status_code}: {_excerpt(text)}")
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise RuntimeError(f"sandbox create returned non-JSON: {_excerpt(text)}") from e
         if not isinstance(data, dict) or "id" not in data:
             raise RuntimeError(f"sandbox create unexpected body: {data!r}")
         self._sandbox_id = str(data["id"])
@@ -150,17 +150,17 @@ class FlashSandbox:
         # Best-effort delete; never raise from teardown.
         if self._session is not None and self._sandbox_id is not None:
             url = _delete_url(self._base_url, self._prefix, self._sandbox_id)
-            timeout = aiohttp.ClientTimeout(total=self._create_timeout_s)
+            timeout = httpx2.Timeout(self._create_timeout_s)
             try:
-                async with self._session.delete(
+                resp = await self._session.delete(
                     url, headers=self._headers, timeout=timeout
-                ) as resp:
-                    await resp.read()
+                )
+                await resp.aread()
             except Exception:
                 pass
         if self._session is not None:
             try:
-                await self._session.close()
+                await self._session.aclose()
             finally:
                 self._session = None
         self._sandbox_id = None
@@ -173,19 +173,19 @@ class FlashSandbox:
         body = _exec_body(command)
         # Pad the client-side timeout so the server can return its own timeout
         # error rather than us tearing down the connection first (agent.py:338).
-        timeout = aiohttp.ClientTimeout(total=timeout_s + 30.0)
+        timeout = httpx2.Timeout(timeout_s + 30.0)
         try:
-            async with self._session.post(
+            resp = await self._session.post(
                 url, headers=self._headers, json=body, timeout=timeout
-            ) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    return -1, f"<sandbox exec HTTP {resp.status}: {_excerpt(text)}>"
-                try:
-                    data = json.loads(text)
-                except ValueError:
-                    return -1, f"<sandbox exec non-JSON: {_excerpt(text)}>"
-        except (TimeoutError, aiohttp.ServerTimeoutError):
+            )
+            text = resp.text
+            if resp.status_code >= 400:
+                return -1, f"<sandbox exec HTTP {resp.status_code}: {_excerpt(text)}>"
+            try:
+                data = json.loads(text)
+            except ValueError:
+                return -1, f"<sandbox exec non-JSON: {_excerpt(text)}>"
+        except (TimeoutError, httpx2.TimeoutException):
             return -1, f"<sandbox exec timed out after {timeout_s}s>"
         return _parse_exec_response(data)
 
@@ -197,13 +197,12 @@ class FlashSandbox:
         params = _file_put_params(path)
         headers = dict(self._headers)
         headers["Content-Type"] = "application/octet-stream"
-        timeout = aiohttp.ClientTimeout(total=self._create_timeout_s)
-        async with self._session.put(
-            url, headers=headers, params=params, data=content, timeout=timeout
-        ) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(
-                    f"sandbox file put HTTP {resp.status} for {path!r}: {_excerpt(text)}"
-                )
-            await resp.read()
+        timeout = httpx2.Timeout(self._create_timeout_s)
+        resp = await self._session.put(
+            url, headers=headers, params=params, content=content, timeout=timeout
+        )
+        text = resp.text
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"sandbox file put HTTP {resp.status_code} for {path!r}: {_excerpt(text)}"
+            )

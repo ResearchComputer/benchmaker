@@ -19,7 +19,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable, Optional, Union
 
-import aiohttp
+import httpx2
 
 
 class Monitor(ABC):
@@ -102,26 +102,26 @@ class PrometheusMonitor(Monitor):
         self.interval_s = interval_s
         self.name = name
         self.tick_at_start = tick_at_start
-        self._timeout = aiohttp.ClientTimeout(total=timeout_s)
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._timeout = httpx2.Timeout(timeout_s)
+        self._session: Optional[httpx2.AsyncClient] = None
 
     async def setup(self) -> None:
-        self._session = aiohttp.ClientSession(timeout=self._timeout)
+        self._session = httpx2.AsyncClient(timeout=self._timeout)
 
     async def tick(self) -> Optional[dict[str, float]]:
         assert self._session is not None
         try:
-            async with self._session.get(self._url, headers=self._headers) as r:
-                if r.status >= 400:
-                    return None
-                text = await r.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+            r = await self._session.get(self._url, headers=self._headers)
+            if r.status_code >= 400:
+                return None
+            text = r.text
+        except (httpx2.HTTPError, asyncio.TimeoutError):
             return None
         return parse_prometheus(text, names=self._names, labelled_keys=self._labelled)
 
     async def aclose(self) -> None:
         if self._session is not None:
-            await self._session.close()
+            await self._session.aclose()
             self._session = None
 
 

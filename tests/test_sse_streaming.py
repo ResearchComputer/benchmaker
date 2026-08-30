@@ -1,8 +1,8 @@
 """Streaming-SSE parsing must survive chunk boundaries that split an event.
 
-Regression for issue #13: aiohttp's ``iter_any()`` yields bytes at arbitrary
-boundaries, so a single SSE ``data:`` event — most often the final, largest
-``usage`` line — can be split across two ``stream_chunks``. Parsing each chunk
+Regression for issue #13: the HTTP client (httpx2's ``aiter_raw()``, formerly
+aiohttp's ``iter_any()``) yields bytes at arbitrary boundaries, so a single
+SSE ``data:`` event — most often the final, largest ``usage`` line — can be split across two ``stream_chunks``. Parsing each chunk
 independently silently dropped the split event, losing ``prompt_tokens`` /
 ``cached_tokens`` (making prefix-cache ``hit`` read as 0 for every request).
 """

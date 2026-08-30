@@ -466,11 +466,11 @@ def openai_chat_judge(
 ) -> tuple[JudgeSend, Callable[[], Awaitable[None]]]:
     """Convenience: returns `(send, aclose)` for an OpenAI-compat chat endpoint.
 
-    Opens a dedicated aiohttp session on first call. The caller should
+    Opens a dedicated httpx2 async client on first call. The caller should
     `await aclose()` at the end of the run (or wire it into a workload-type's
     `aclose` chain).
     """
-    import aiohttp
+    import httpx2
 
     state: dict[str, Any] = {"session": None}
     headers = {"Content-Type": "application/json"}
@@ -479,10 +479,10 @@ def openai_chat_judge(
 
     async def _send(prompt: str) -> str:
         if state["session"] is None:
-            state["session"] = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=timeout_s)
+            state["session"] = httpx2.AsyncClient(
+                timeout=httpx2.Timeout(timeout_s)
             )
-        sess: aiohttp.ClientSession = state["session"]
+        sess: httpx2.AsyncClient = state["session"]
         body = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -490,8 +490,8 @@ def openai_chat_judge(
             "max_tokens": max_tokens,
             "stream": False,
         }
-        async with sess.post(url, headers=headers, json=body) as resp:
-            data = await resp.json()
+        resp = await sess.post(url, headers=headers, json=body)
+        data = resp.json()
         choices = data.get("choices") or []
         if not choices:
             return ""
@@ -501,7 +501,7 @@ def openai_chat_judge(
     async def _aclose() -> None:
         sess = state["session"]
         if sess is not None:
-            await sess.close()
+            await sess.aclose()
             state["session"] = None
 
     return _send, _aclose

@@ -222,16 +222,16 @@ class _FakeEnv:
 
 
 async def test_exec_bridge_forwards_to_environment():
-    import aiohttp
+    import httpx2
 
     env = _FakeEnv()
     bridge = P._ExecBridge(env, cwd="/testbed", exec_timeout_s=42.0)
     await bridge.start()
     try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(f"{bridge.url}/exec",
-                                 json={"command": "ls -la", "timeout": 7}) as r:
-                body = await r.json()
+        async with httpx2.AsyncClient() as sess:
+            r = await sess.post(f"{bridge.url}/exec",
+                                 json={"command": "ls -la", "timeout": 7})
+            body = r.json()
     finally:
         await bridge.stop()
 
@@ -255,18 +255,18 @@ async def test_exec_bridge_uses_login_shell_for_env_activation():
     routed command in ``bash -lc`` (mirroring PiContainerAgent), with the inner
     ``cd <cwd> && <command>`` quoted as a single argument.
     """
-    import aiohttp
+    import httpx2
     import shlex
 
     env = _FakeEnv()
     bridge = P._ExecBridge(env, cwd="/testbed", exec_timeout_s=42.0)
     await bridge.start()
     try:
-        async with aiohttp.ClientSession() as sess:
+        async with httpx2.AsyncClient() as sess:
             # A command with shell metacharacters must survive the wrapping intact.
-            async with sess.post(f"{bridge.url}/exec",
-                                 json={"command": "python -m pytest && echo 'done'"}) as r:
-                await r.json()
+            r = await sess.post(f"{bridge.url}/exec",
+                                 json={"command": "python -m pytest && echo 'done'"})
+            r.json()
     finally:
         await bridge.stop()
 
@@ -279,15 +279,15 @@ async def test_exec_bridge_uses_login_shell_for_env_activation():
 
 async def test_exec_bridge_login_shell_without_cwd():
     """With no cwd, still use a login shell (just the bare command, no `cd`)."""
-    import aiohttp
+    import httpx2
 
     env = _FakeEnv()
     bridge = P._ExecBridge(env, cwd="", exec_timeout_s=42.0)
     await bridge.start()
     try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(f"{bridge.url}/exec", json={"command": "ls -la"}) as r:
-                await r.json()
+        async with httpx2.AsyncClient() as sess:
+            r = await sess.post(f"{bridge.url}/exec", json={"command": "ls -la"})
+            r.json()
     finally:
         await bridge.stop()
 
@@ -295,7 +295,7 @@ async def test_exec_bridge_login_shell_without_cwd():
 
 
 async def test_exec_bridge_surfaces_environment_error():
-    import aiohttp
+    import httpx2
 
     class _Boom(_FakeEnv):
         async def exec(self, command, cwd=None, timeout_sec=None):
@@ -304,9 +304,9 @@ async def test_exec_bridge_surfaces_environment_error():
     bridge = P._ExecBridge(_Boom(), cwd="/testbed", exec_timeout_s=10.0)
     await bridge.start()
     try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(f"{bridge.url}/exec", json={"command": "x"}) as r:
-                body = await r.json()
+        async with httpx2.AsyncClient() as sess:
+            r = await sess.post(f"{bridge.url}/exec", json={"command": "x"})
+            body = r.json()
     finally:
         await bridge.stop()
     assert body["return_code"] == -1 and "pod gone" in body["stderr"]

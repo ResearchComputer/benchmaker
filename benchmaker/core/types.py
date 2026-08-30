@@ -67,7 +67,7 @@ PostResponseHook = Callable[
     "Sample | Awaitable[Sample]",
 ]
 
-# A `fire(req)` callable closes over the aiohttp session, applies pre-hooks,
+# A `fire(req)` callable closes over the httpx2 async client, applies pre-hooks,
 # times the call, and returns a Response. A WorkloadType.run_ticket implementation
 # may call this 0..N times per ticket.
 FireRequest = Callable[[Request], Awaitable[Response]]

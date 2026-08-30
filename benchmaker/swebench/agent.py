@@ -28,7 +28,7 @@ pod shape (image, ``cpu_cores``, ``memory_mb``).
 YAML wiring lives in ``examples/swebench/config.yaml``.
 """
 import re
-import aiohttp
+import httpx2
 import os
 import asyncio
 import tempfile
@@ -210,7 +210,7 @@ class CodingAgent(Agent):
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._max_obs_chars = max_obs_chars
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: Optional[httpx2.AsyncClient] = None
 
         self._sandbox_url = sandbox_url.rstrip("/") if sandbox_url else None
         self._sandbox_spec = {**_DEFAULT_SANDBOX_SPEC, **(sandbox_spec or {})}
@@ -224,14 +224,14 @@ class CodingAgent(Agent):
 
     # ---- model -------------------------------------------------------- #
 
-    async def _ensure_session(self) -> aiohttp.ClientSession:
+    async def _ensure_session(self) -> httpx2.AsyncClient:
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            self._session = httpx2.AsyncClient()
         return self._session
 
     async def aclose(self) -> None:
         if self._session is not None:
-            await self._session.close()
+            await self._session.aclose()
             self._session = None
 
     async def _send(self, messages: list[dict]) -> str:
@@ -259,19 +259,19 @@ class CodingAgent(Agent):
             "max_tokens": self._max_tokens,
             "stream": False,
         }
-        async with sess.post(self._url, headers=headers, json=body) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
-                raise RuntimeError(f"model endpoint HTTP {resp.status}: {excerpt}")
-            import json as _json
-            try:
-                data = _json.loads(text)
-            except _json.JSONDecodeError as e:
-                excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
-                raise RuntimeError(
-                    f"model endpoint returned non-JSON: {excerpt}"
-                ) from e
+        resp = await sess.post(self._url, headers=headers, json=body)
+        text = resp.text
+        if resp.status_code >= 400:
+            excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
+            raise RuntimeError(f"model endpoint HTTP {resp.status_code}: {excerpt}")
+        import json as _json
+        try:
+            data = _json.loads(text)
+        except _json.JSONDecodeError as e:
+            excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
+            raise RuntimeError(
+                f"model endpoint returned non-JSON: {excerpt}"
+            ) from e
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"model endpoint returned no choices: {data!r}")
@@ -309,21 +309,21 @@ class CodingAgent(Agent):
             body["ttl_seconds"] = self._sandbox_ttl_seconds
         sess = await self._ensure_session()
         url = f"{self._sandbox_url}{self._sandbox_prefix}"
-        timeout = aiohttp.ClientTimeout(total=self._sandbox_create_timeout_s)
-        async with sess.post(url, headers=self._sandbox_headers,
-                             json=body, timeout=timeout) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(
-                    f"sandbox create HTTP {resp.status}: {_excerpt(text)}"
-                )
-            import json as _json
-            try:
-                data = _json.loads(text)
-            except _json.JSONDecodeError as e:
-                raise RuntimeError(
-                    f"sandbox create returned non-JSON: {_excerpt(text)}"
-                ) from e
+        timeout = httpx2.Timeout(self._sandbox_create_timeout_s)
+        resp = await sess.post(url, headers=self._sandbox_headers,
+                             json=body, timeout=timeout)
+        text = resp.text
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"sandbox create HTTP {resp.status_code}: {_excerpt(text)}"
+            )
+        import json as _json
+        try:
+            data = _json.loads(text)
+        except _json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"sandbox create returned non-JSON: {_excerpt(text)}"
+            ) from e
         if not isinstance(data, dict) or "id" not in data:
             raise RuntimeError(f"sandbox create unexpected body: {data!r}")
         return str(data["id"])
@@ -335,18 +335,18 @@ class CodingAgent(Agent):
         sess = await self._ensure_session()
         # Pad the client-side timeout so the server can return its own
         # timeout error rather than us tearing down the connection first.
-        timeout = aiohttp.ClientTimeout(total=self._timeout_per_step_s + 30.0)
+        timeout = httpx2.Timeout(self._timeout_per_step_s + 30.0)
         try:
-            async with sess.post(url, headers=self._sandbox_headers,
-                                 json=body, timeout=timeout) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    return -1, f"<sandbox exec HTTP {resp.status}: {_excerpt(text)}>"
-                import json as _json
-                try:
-                    data = _json.loads(text)
-                except _json.JSONDecodeError:
-                    return -1, f"<sandbox exec non-JSON: {_excerpt(text)}>"
+            resp = await sess.post(url, headers=self._sandbox_headers,
+                                 json=body, timeout=timeout)
+            text = resp.text
+            if resp.status_code >= 400:
+                return -1, f"<sandbox exec HTTP {resp.status_code}: {_excerpt(text)}>"
+            import json as _json
+            try:
+                data = _json.loads(text)
+            except _json.JSONDecodeError:
+                return -1, f"<sandbox exec non-JSON: {_excerpt(text)}>"
         except asyncio.TimeoutError:
             return -1, f"<sandbox exec timed out after {self._timeout_per_step_s}s>"
         rc = data.get("exit_code")
@@ -362,11 +362,11 @@ class CodingAgent(Agent):
     async def _sandbox_delete(self, sid: str) -> None:
         sess = await self._ensure_session()
         url = f"{self._sandbox_url}{self._sandbox_prefix}/{sid}"
-        timeout = aiohttp.ClientTimeout(total=self._sandbox_create_timeout_s)
+        timeout = httpx2.Timeout(self._sandbox_create_timeout_s)
         try:
-            async with sess.delete(url, headers=self._sandbox_headers,
-                                   timeout=timeout) as resp:
-                await resp.read()
+            resp = await sess.delete(url, headers=self._sandbox_headers,
+                                   timeout=timeout)
+            await resp.aread()
         except Exception:
             # Best-effort cleanup; never fail the trajectory over this.
             pass

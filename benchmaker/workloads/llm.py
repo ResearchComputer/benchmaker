@@ -281,9 +281,10 @@ class OpenAIChatWorkloadType(WorkloadType):
         finish_reason: Optional[str] = None
         usage_seen = False
 
-        # Reassemble across chunk boundaries first: aiohttp yields bytes at
-        # arbitrary offsets, so the final `usage` event is often split in two and
-        # would be silently dropped if each chunk were parsed on its own (#13).
+        # Reassemble across chunk boundaries first: httpx2's aiter_raw()
+        # yields bytes at arbitrary offsets, so the final `usage` event is
+        # often split in two and would be silently dropped if each chunk were
+        # parsed on its own (#13).
         for line, t in reassemble_sse_lines(chunks, chunk_times):
             line = line.strip()
             if not line:

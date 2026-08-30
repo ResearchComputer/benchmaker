@@ -365,7 +365,7 @@ async def test_host_agent_writes_spans_and_tokens(tmp_path):
 
 
 async def test_pi_exec_bridge_emits_spans(tmp_path):
-    import aiohttp
+    import httpx2
     from benchmaker.swebench.pi_agent import _ExecBridge
 
     class FakeExecRes:
@@ -382,11 +382,11 @@ async def test_pi_exec_bridge_emits_spans(tmp_path):
                          spans_path=spans_path)
     await bridge.start()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{bridge.url}/exec",
-                              json={"command": "echo hi"}) as resp:
-                body = await resp.json()
-                assert body["return_code"] == 0
+        async with httpx2.AsyncClient() as s:
+            resp = await s.post(f"{bridge.url}/exec",
+                              json={"command": "echo hi"})
+            body = resp.json()
+            assert body["return_code"] == 0
     finally:
         await bridge.stop()
 

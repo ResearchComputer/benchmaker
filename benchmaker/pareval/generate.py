@@ -131,16 +131,16 @@ def make_send_fn(
     temperature: float,
 ) -> Callable[[list[dict]], Awaitable[tuple[str, Optional[dict]]]]:
     """Return an async (messages) -> (text, usage) that POSTs to chat/completions."""
-    import aiohttp
+    import httpx2
 
     from benchmaker.swebench.agent import parse_openai_usage
 
-    session: Optional[aiohttp.ClientSession] = None
+    session: Optional[httpx2.AsyncClient] = None
 
-    def _get_session() -> aiohttp.ClientSession:
+    def _get_session() -> httpx2.AsyncClient:
         nonlocal session
-        if session is None or session.closed:
-            session = aiohttp.ClientSession()
+        if session is None or session.is_closed:
+            session = httpx2.AsyncClient()
         return session
 
     async def send_fn(messages: list[dict]) -> tuple[str, Optional[dict]]:
@@ -148,14 +148,14 @@ def make_send_fn(
             api_base, model, api_key, temperature, messages
         )
         sess = _get_session()
-        async with sess.post(url, headers=headers, json=body) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
-                raise RuntimeError(f"model endpoint HTTP {resp.status}: {excerpt}")
-            import json as _json
+        resp = await sess.post(url, headers=headers, json=body)
+        text = resp.text
+        if resp.status_code >= 400:
+            excerpt = text if len(text) <= 500 else text[:500] + "...[truncated]"
+            raise RuntimeError(f"model endpoint HTTP {resp.status_code}: {excerpt}")
+        import json as _json
 
-            data = _json.loads(text)
+        data = _json.loads(text)
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"model endpoint returned no choices: {data!r}")
@@ -164,8 +164,8 @@ def make_send_fn(
 
     async def _aclose() -> None:
         nonlocal session
-        if session is not None and not session.closed:
-            await session.close()
+        if session is not None and not session.is_closed:
+            await session.aclose()
         session = None
 
     send_fn.aclose = _aclose

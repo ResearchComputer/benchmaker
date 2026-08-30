@@ -79,7 +79,7 @@ import socket
 
 import pytest
 from aiohttp import web
-import aiohttp
+import httpx2
 
 
 def _free_port() -> int:
@@ -100,17 +100,17 @@ async def test_app_serves_recorded_turns_streaming_and_not():
     await site.start()
     base = f"http://127.0.0.1:{port}/v1/chat/completions"
     try:
-        async with aiohttp.ClientSession() as s:
+        async with httpx2.AsyncClient() as s:
             # turn 0 (non-streaming) -> tool call
-            async with s.post(base, json={"model": "m", "stream": False,
-                    "messages": _messages(0)}) as resp:
-                body = await resp.json()
+            resp = await s.post(base, json={"model": "m", "stream": False,
+                    "messages": _messages(0)})
+            body = resp.json()
             assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "bash"
 
             # turn 1 (streaming) -> final text + [DONE]
-            async with s.post(base, json={"model": "m", "stream": True,
-                    "messages": _messages(1)}) as resp:
-                text = await resp.text()
+            resp = await s.post(base, json={"model": "m", "stream": True,
+                    "messages": _messages(1)})
+            text = resp.text
             assert "data: [DONE]" in text
             assert '"content": "done"' in text
             # default path (no tokenizer) stays single-chunk: one content delta
@@ -119,9 +119,9 @@ async def test_app_serves_recorded_turns_streaming_and_not():
             assert chunk_count == 2
 
             # overflow -> terminal stop, miss counted
-            async with s.post(base, json={"model": "m", "stream": False,
-                    "messages": _messages(5)}) as resp:
-                body = await resp.json()
+            resp = await s.post(base, json={"model": "m", "stream": False,
+                    "messages": _messages(5)})
+            body = resp.json()
             assert body["choices"][0]["finish_reason"] == "stop"
             assert R.get_misses(app) == 1
     finally:
@@ -303,10 +303,10 @@ async def test_app_timed_streaming_reconstructs_over_http():
     await site.start()
     base = f"http://127.0.0.1:{port}/v1/chat/completions"
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(base, json={"model": "m", "stream": True,
-                    "messages": _messages(0)}) as resp:
-                text = await resp.text()
+        async with httpx2.AsyncClient() as s:
+            resp = await s.post(base, json={"model": "m", "stream": True,
+                    "messages": _messages(0)})
+            text = resp.text
         payloads = [json.loads(l[len("data: "):]) for l in text.splitlines()
                     if l.startswith("data: {")]
         deltas = [p["choices"][0]["delta"] for p in payloads]

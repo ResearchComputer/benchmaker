@@ -161,9 +161,10 @@ class SGLangGenerateWorkloadType(WorkloadType):
         cached_tokens: Optional[int] = None
         finish_reason: Any = None
 
-        # Reassemble across chunk boundaries: aiohttp yields bytes at arbitrary
-        # offsets, so a `meta_info` event can be split across chunks and would be
-        # silently dropped if each chunk were parsed independently (#13).
+        # Reassemble across chunk boundaries: httpx2's aiter_raw() yields
+        # bytes at arbitrary offsets, so a `meta_info` event can be split
+        # across chunks and would be silently dropped if each chunk were
+        # parsed independently (#13).
         for line, t in reassemble_sse_lines(chunks, chunk_times):
             line = line.strip()
             if line.startswith(b"data:"):
